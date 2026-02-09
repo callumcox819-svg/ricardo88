@@ -50,11 +50,8 @@ def normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def filter_no_bids_buy_now(it: Dict[str, Any]) -> bool:
-    # Strict TZ: fixed-price only (Buy Now) and NO auction and NO bids
+    # TZ: only fixed price items (Buy Now) and no bids
     if not it.get("has_buy_now"):
-        return False
-    # Exclude auctions entirely (even if bids are 0)
-    if it.get("has_auction") is True:
         return False
     try:
         bids = int(it.get("bids_count") or 0)

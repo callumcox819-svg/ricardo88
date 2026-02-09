@@ -239,6 +239,7 @@ async def run_search_and_send(app, chat_id: int, user_id: int, one_off: bool = F
 
     try:
         items = ricardo_collect_items(urls=urls, max_items=max_items)
+        logger.info("Apify returned %s items before filters for user %s", len(items), user_id)
         items = filter_by_blacklists(user_id, items)
         items = filter_new_only(user_id, items)
 
@@ -268,10 +269,19 @@ def _remove_job(context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
     for j in jobs:
         j.schedule_removal()
 
+RUN_GUARD = "_running_users"
+
 async def job_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = context.job.data["chat_id"]
     user_id = context.job.data["user_id"]
-    await run_search_and_send(context.application, chat_id=chat_id, user_id=user_id, one_off=False)
+    running = context.application.bot_data.setdefault(RUN_GUARD, set())
+    if user_id in running:
+        return
+    running.add(user_id)
+    try:
+        await run_search_and_send(context.application, chat_id=chat_id, user_id=user_id, one_off=False)
+    finally:
+        running.discard(user_id)
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
