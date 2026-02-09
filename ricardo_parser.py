@@ -22,18 +22,23 @@ POPULAR_CATEGORIES: Dict[str, str] = {
 }
 
 def apify_run(urls: List[str], max_items: int) -> List[Dict[str, Any]]:
-    token = os.getenv("APIFY_TOKEN", "").strip()
+    token = (
+        os.getenv("APIFY_TOKEN", "").strip()
+        or os.getenv("APIFY_API_TOKEN", "").strip()
+        or os.getenv("APIFY_API_KEY", "").strip()
+    )
     if not token:
         raise RuntimeError("APIFY_TOKEN is not set")
 
-    endpoint = f"https://api.apify.com/v2/acts/{ACTOR_ID}/run-sync-get-dataset-items?token={token}"
+    endpoint = f"https://api.apify.com/v2/acts/{ACTOR_ID}/run-sync-get-dataset-items"
+    headers = {"Authorization": f"Bearer {token}"}
     payload = {
         # most actors accept this field name
         "urls": urls,
         "maxItems": max_items,
         # keep retries low, actor handles itself
     }
-    r = requests.post(endpoint, json=payload, timeout=180)
+    r = requests.post(endpoint, json=payload, headers=headers, timeout=180)
     r.raise_for_status()
     data = r.json()
     if not isinstance(data, list):
