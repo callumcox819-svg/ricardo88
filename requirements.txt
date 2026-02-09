@@ -1,5 +1,6 @@
-python-telegram-bot[webhooks,job-queue]==21.6
-python-dotenv==1.0.1
+python-telegram-bot[webhooks]==21.9
 requests==2.32.3
 beautifulsoup4==4.12.3
 lxml==5.3.0
+python-dotenv==1.0.1
+certifi==2025.1.31

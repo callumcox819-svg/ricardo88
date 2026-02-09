@@ -1,9 +1,6 @@
 # ricardo_parser.py
-# TZ:
-# - private sellers only (heuristics)
-# - fixed price / buy now (Sofort kaufen), no auctions/bids
-# - seller name must be "Name Surname" (2+ words)
-# Output format matches your JSON contract.
+# Parser for ricardo.ch (private sellers, fixed price, no bids)
+# Output format matches kleinanzeigen bot JSON structure
 
 import re
 import time
@@ -26,7 +23,7 @@ NAME_SURNAME_RE = re.compile(
     r"^[A-Za-zÀ-ÖØ-öø-ÿÄÖÜäöüß'\-]+\s+[A-Za-zÀ-ÖØ-öø-ÿÄÖÜäöüß'\-]+(?:\s+[A-Za-zÀ-ÖØ-öø-ÿÄÖÜäöüß'\-]+)*$"
 )
 
-def http_get(url: str, timeout: int = 25) -> Optional[str]:
+def http_get(url: str, timeout: int = 20) -> Optional[str]:
     try:
         r = requests.get(url, headers=HEADERS, timeout=timeout)
         if r.status_code != 200:
@@ -36,7 +33,7 @@ def http_get(url: str, timeout: int = 25) -> Optional[str]:
         return None
 
 def soup_from_html(html: str) -> BeautifulSoup:
-    return BeautifulSoup(html, "lxml")
+    return BeautifulSoup(html, "html.parser")
 
 def normalize_link(href: str) -> str:
     if not href:
@@ -57,22 +54,15 @@ def is_name_surname(seller_name: str) -> bool:
 
 def is_fixed_price_no_bids(page_text: str) -> bool:
     t = (page_text or "").lower()
-
-    # Must be "buy now"
-    has_buy_now = ("sofort kaufen" in t) or ("sofortkaufen" in t)
-
-    # Auction signals
+    has_buy_now = ("sofort kaufen" in t) or ("kaufen" in t and "sofort" in t)
     has_auction_signals = ("gebote" in t) or ("bieten" in t) or ("auktion" in t)
 
     if not has_buy_now:
         return False
-
     if has_auction_signals:
-        # allow ONLY if explicitly 0 bids
         if re.search(r"\b0\s+gebote\b", t):
             return True
         return False
-
     return True
 
 def extract_og(soup: BeautifulSoup, prop: str) -> str:
@@ -107,11 +97,9 @@ def extract_price_chf(soup: BeautifulSoup) -> str:
     if m:
         val = re.sub(r"\s+", " ", m.group(1)).strip()
         return f"{val} CHF"
-
     return ""
 
 def extract_seller_name(soup: BeautifulSoup) -> str:
-    # Try label-based extraction first
     seller_label = soup.find(string=re.compile(r"verk(ä|ae)ufer", re.IGNORECASE))
     if seller_label:
         parent = getattr(seller_label, "parent", None)
@@ -124,14 +112,12 @@ def extract_seller_name(soup: BeautifulSoup) -> str:
                     if txt:
                         return txt
 
-    # Fallback: profile/shop links
     for a in soup.select("a[href]"):
         href = a.get("href", "")
         if "/user/" in href or "/shop/" in href or "/de/u/" in href:
             txt = a.get_text(" ", strip=True)
             if txt and len(txt) <= 60:
                 return txt
-
     return ""
 
 def is_private_seller(page_text: str, seller_name: str) -> bool:
@@ -183,7 +169,7 @@ def ricardo_parse_ad_page(url: str) -> Optional[Dict]:
         "item_person_name": seller_name,
     }
 
-def ricardo_search_links(query: str, page: int = 1, limit: int = 80) -> List[str]:
+def ricardo_search_links(query: str, page: int = 1, limit: int = 60) -> List[str]:
     q = quote((query or "").strip())
     url = f"{BASE_URL}/de/s/{q}/"
     if page > 1:
@@ -206,16 +192,9 @@ def ricardo_search_links(query: str, page: int = 1, limit: int = 80) -> List[str
                 links.append(full)
         if len(links) >= limit:
             break
-
     return links
 
-def ricardo_collect_items(
-    query: str,
-    pages: int = 3,
-    per_page_links: int = 80,
-    delay: float = 0.25,
-    max_items: int = 30
-) -> List[Dict]:
+def ricardo_collect_items(query: str, pages: int = 2, per_page_links: int = 60, delay: float = 0.2) -> List[Dict]:
     results: List[Dict] = []
     seen = set()
 
@@ -225,14 +204,8 @@ def ricardo_collect_items(
             if link in seen:
                 continue
             seen.add(link)
-
             it = ricardo_parse_ad_page(link)
             if it:
                 results.append(it)
-
-            if len(results) >= max_items:
-                return results
-
             time.sleep(delay)
-
     return results
