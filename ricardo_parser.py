@@ -50,3 +50,10 @@ def apify_search(urls: List[str], max_items: int = 30) -> List[Dict[str, Any]]:
         })
 
     return results
+
+
+# Compatibility wrapper for previous bot versions
+def ricardo_collect_items(query=None, pages=1, max_items=30):
+    # If user selected categories in future, urls list will be built there.
+    urls = ["https://www.ricardo.ch/de/"]
+    return apify_search(urls, max_items=max_items)
