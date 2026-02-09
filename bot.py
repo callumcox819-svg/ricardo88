@@ -25,9 +25,11 @@ logger = logging.getLogger("ricardo_bot")
 RESULTS_DIR = Path("Results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
+
 def safe_filename(s: str) -> str:
     s = s.strip().replace(" ", "_")
     return "".join(ch for ch in s if ch.isalnum() or ch in ("_", "-", "."))[:80] or "query"
+
 
 def save_json(items: List[Dict], query: str) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -36,6 +38,7 @@ def save_json(items: List[Dict], query: str) -> Path:
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"items": items}, f, ensure_ascii=False, indent=2)
     return path
+
 
 def save_txt(items: List[Dict], query: str) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -52,12 +55,14 @@ def save_txt(items: List[Dict], query: str) -> Path:
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Ricardo Bot ✅\n"
         "Команда: /ricardo Имя Фамилия [json|txt]\n"
         "Пример: /ricardo Max Mustermann json"
     )
+
 
 async def ricardo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -78,7 +83,6 @@ async def ricardo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text("Начал работу ✅\nСобираю объявления: 0/30")
 
-    # main
     items = ricardo_collect_items(query=query, pages=3, max_items=30)
 
     await msg.edit_text(f"Начал работу ✅\nСобираю объявления: {len(items)}/30")
@@ -86,27 +90,48 @@ async def ricardo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     path = save_txt(items, query) if fmt == "txt" else save_json(items, query)
     await update.message.reply_document(document=open(path, "rb"))
 
+
 def main():
     load_dotenv()
+
     token = os.getenv("BOT_TOKEN", "").strip()
     if not token:
-        raise SystemExit("BOT_TOKEN is missing. Create .env from .env.example or set Railway Variables.")
+        raise SystemExit("BOT_TOKEN is missing (set Railway Variable BOT_TOKEN).")
+
+    # Railway gives you PORT; webhook needs public URL
+    port = int(os.getenv("PORT", "8080"))
+    webhook_base = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
+    if not webhook_base:
+        raise SystemExit(
+            "WEBHOOK_BASE_URL is missing. "
+            "Set it to your Railway public domain, e.g. https://your-app.up.railway.app"
+        )
+
+    # Endpoint path can be anything; keep secret-ish
+    webhook_path = os.getenv("WEBHOOK_PATH", "/telegram").strip()
+    if not webhook_path.startswith("/"):
+        webhook_path = "/" + webhook_path
+
+    webhook_url = webhook_base + webhook_path
 
     app = ApplicationBuilder().token(token).build()
-
-    # On start: clear webhook + pending updates (helps avoid conflicts)
-    async def _on_start(app_):
-        try:
-            await app_.bot.delete_webhook(drop_pending_updates=True)
-        except Exception as e:
-            logger.warning("delete_webhook failed: %s", e)
-
-    app.post_init = _on_start
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("ricardo", ricardo_cmd))
 
-    app.run_polling(drop_pending_updates=True)
+    logger.info("Starting webhook on 0.0.0.0:%s, url=%s", port, webhook_url)
+
+    # run_webhook:
+    # - listens on Railway port
+    # - sets webhook in Telegram
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=webhook_path.lstrip("/"),
+        webhook_url=webhook_url,
+        drop_pending_updates=True,
+    )
+
 
 if __name__ == "__main__":
     main()
