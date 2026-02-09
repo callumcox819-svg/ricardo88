@@ -61,7 +61,7 @@ BTN_AD_CLEAR_GBL = "Очистить общий ЧС"
 COUNT_CHOICES = ["5", "10", "20", "30"]
 
 # Conversation states
-MAIN, SET_COUNT, BL_MENU, BL_ADD_NAME, BL_REMOVE_NAME, ADMIN_MENU = range(6)
+MAIN, SET_COUNT, CATS_MENU, BL_MENU, BL_ADD_NAME, BL_REMOVE_NAME, ADMIN_MENU = range(7)
 
 DEFAULT_USER_SETTINGS = {
     "max_items": 30,
