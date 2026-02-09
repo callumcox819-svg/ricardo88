@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from ricardo_parser import ricardo_collect_items
+from ricardo_parser import apify_search, POPULAR_CATEGORIES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +42,10 @@ BTN_SETTINGS = "Настройки ⚙️"
 BTN_ADMIN = "Админ панель 🛠"
 BTN_BACK = "Назад ↩️"
 
+
+BTN_CATEGORIES = "Категории 📂"
+BTN_CATS_DONE = "🔥 Продолжить настройку"
+BTN_CATS_ALL = "Все подряд"
 BTN_COUNT = "Кол-во объявлений 📦"
 BTN_BLACKLIST = "ЧС 🚫"
 
@@ -191,6 +195,36 @@ def blacklist_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
          [BTN_BACK]],
         resize_keyboard=True,
     )
+
+
+def _cat_button_label(label: str, selected: bool) -> str:
+    return ("✅ " + label) if selected else label
+
+def categories_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
+    s = get_user_settings(user_id)
+    mode = s.get("categories_mode", "all")
+    selected_urls = set(s.get("categories", []) or [])
+    rows = []
+    labels = list(POPULAR_CATEGORIES.keys())
+
+    # Make 2-column grid
+    for i in range(0, len(labels), 2):
+        row = []
+        for j in range(2):
+            if i + j >= len(labels):
+                break
+            lab = labels[i + j]
+            url = POPULAR_CATEGORIES[lab]
+            is_sel = (mode == "selected") and (url in selected_urls)
+            row.append(_cat_button_label(lab, is_sel))
+        rows.append(row)
+
+    # 'All' row
+    all_label = _cat_button_label(BTN_CATS_ALL, mode == "all")
+    rows.append([all_label])
+    rows.append([BTN_CATS_DONE])
+    rows.append([BTN_BACK])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def admin_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[BTN_AD_STATUS], [BTN_AD_SHOW_GBL, BTN_AD_CLEAR_GBL], [BTN_BACK]], resize_keyboard=True)
@@ -345,6 +379,60 @@ async def set_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Теперь в JSON: {t} объявлений", reply_markup=settings_menu_kb())
     return MAIN
 
+
+
+async def text_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text("Категории 📂\nВыбери категории или 'Все подряд':", reply_markup=categories_menu_kb(user_id))
+    return CATS_MENU
+
+async def cats_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    txt = (update.message.text or "").strip()
+
+    # Continue
+    if txt == BTN_CATS_DONE:
+        await update.message.reply_text("✅ Категории сохранены.", reply_markup=settings_menu_kb())
+        return MAIN
+
+    if txt == BTN_BACK:
+        await update.message.reply_text("Ок.", reply_markup=settings_menu_kb())
+        return MAIN
+
+    # normalize label
+    if txt.startswith("✅ "):
+        txt = txt[2:].strip()
+
+    s = get_user_settings(user_id)
+
+    # All mode
+    if txt == BTN_CATS_ALL:
+        s["categories_mode"] = "all"
+        s["categories"] = []
+        set_user_settings(user_id, s)
+        await update.message.reply_text("✅ Режим: Все подряд", reply_markup=categories_menu_kb(user_id))
+        return CATS_MENU
+
+    # Toggle category
+    if txt in POPULAR_CATEGORIES:
+        url = POPULAR_CATEGORIES[txt]
+        sel = set(s.get("categories", []) or [])
+        if s.get("categories_mode") != "selected":
+            s["categories_mode"] = "selected"
+        if url in sel:
+            sel.remove(url)
+        else:
+            sel.add(url)
+        s["categories"] = sorted(sel)
+        # If none selected, fallback to all
+        if not s["categories"]:
+            s["categories_mode"] = "all"
+        set_user_settings(user_id, s)
+        await update.message.reply_text("✅ Обновил выбор.", reply_markup=categories_menu_kb(user_id))
+        return CATS_MENU
+
+    await update.message.reply_text("Нажми кнопку категории.", reply_markup=categories_menu_kb(user_id))
+    return CATS_MENU
 async def text_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text("ЧС 🚫", reply_markup=blacklist_menu_kb(user_id))
@@ -483,6 +571,9 @@ def main():
             SET_COUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, set_count),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
+            ],
+            CATS_MENU: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, cats_handle),
             ],
             BL_MENU: [
                 MessageHandler(filters.TEXT & filters.Regex(rf"^{re.escape(BTN_BL_MODE)}"), bl_toggle_mode),
