@@ -14,7 +14,8 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-from ricardo_parser import POPULAR_CATEGORIES, ricardo_collect_items
+from ricardo_playwright import POPULAR_CATEGORIES, ricardo_collect_items
+import proxy_manager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ricardo_bot")
@@ -26,7 +27,6 @@ SETTINGS_FILE = PROFILE_DIR / "settings.json"
 BLACKLIST_FILE = PROFILE_DIR / "blacklist.json"
 STATE_FILE = PROFILE_DIR / "state.json"
 
-# Buttons (keep existing)
 BTN_START = "Старт ✅"
 BTN_STOP = "Стоп ⛔"
 BTN_SETTINGS = "Настройки ⚙️"
@@ -36,6 +36,7 @@ BTN_BACK = "Назад ↩️"
 BTN_COUNT = "Кол-во объявлений 📦"
 BTN_CATS = "Категории 📂"
 BTN_BLACKLIST = "ЧС 🚫"
+BTN_PROXIES = "Прокси 🛡"
 
 BTN_BL_MODE = "Режим ЧС (общий/личный)"
 BTN_BL_SHOW = "Показать ЧС"
@@ -46,17 +47,19 @@ BTN_CATS_ALL = "Все подряд"
 BTN_CATS_CONTINUE = "🔥 Продолжить настройку"
 BTN_CATS_CLEAR = "Очистить выбор"
 
+BTN_PX_SET = "Задать список прокси"
+BTN_PX_SHOW = "Показать прокси"
+BTN_PX_CLEAR = "Очистить прокси"
+
 COUNT_CHOICES = ["5", "10", "20", "30"]
 
-# States
-MAIN, SET_COUNT, BL_MENU, BL_ADD_NAME, BL_REMOVE_NAME, CATS_MENU = range(6)
+MAIN, SET_COUNT, BL_MENU, BL_ADD_NAME, BL_REMOVE_NAME, CATS_MENU, ADMIN_MENU, PX_SET = range(8)
 
 DEFAULT_USER_SETTINGS = {
     "max_items": 30,
-    "interval_sec": 60,  # "по кд" but still safe for Apify
-    "cats_mode": "all",  # all | selected
-    "cats_selected": [], # list of category names
-    "edit_blacklist_mode": "personal",  # personal | general
+    "cats_mode": "all",
+    "cats_selected": [],
+    "edit_blacklist_mode": "personal",
 }
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -177,7 +180,6 @@ def cats_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
     mode = s.get("cats_mode", "all")
     selected = set(s.get("cats_selected", []))
 
-    # Build 2-column grid like your screenshots (except control buttons at bottom)
     names = [k for k in POPULAR_CATEGORIES.keys() if k != "Все подряд"]
     rows = []
     for i in range(0, len(names), 2):
@@ -187,14 +189,18 @@ def cats_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
             row.append(label)
         rows.append(row)
 
-    # Add "Все подряд" row
     all_label = f"✅ {BTN_CATS_ALL}" if mode == "all" else BTN_CATS_ALL
     rows.append([all_label])
-
     rows.append([BTN_CATS_CLEAR])
     rows.append([BTN_CATS_CONTINUE])
     rows.append([BTN_BACK])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+def admin_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([[BTN_PROXIES], [BTN_BACK]], resize_keyboard=True)
+
+def proxies_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([[BTN_PX_SET], [BTN_PX_SHOW, BTN_PX_CLEAR], [BTN_BACK]], resize_keyboard=True)
 
 def safe_filename(s: str) -> str:
     s = (s or "").strip().replace(" ", "_")
@@ -220,8 +226,7 @@ def filter_by_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict
 def filter_new_only(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     st = get_user_state(user_id)
     sent = set(st.get("sent_links", []))
-    fresh = [it for it in items if it.get("item_link") and it["item_link"] not in sent]
-    return fresh
+    return [it for it in items if it.get("item_link") and it["item_link"] not in sent]
 
 async def run_search_and_send(app, chat_id: int, user_id: int, one_off: bool = False) -> None:
     s = get_user_settings(user_id)
@@ -230,26 +235,23 @@ async def run_search_and_send(app, chat_id: int, user_id: int, one_off: bool = F
     selected = s.get("cats_selected", [])
 
     if mode == "all":
-        # "Все подряд" in Apify works best by scraping multiple popular listing URLs
-        urls = [u for k, u in POPULAR_CATEGORIES.items() if k != "Все подряд"]
+        urls = ["__ALL__"]
     else:
-        if not selected:
-            urls = [POPULAR_CATEGORIES["Все подряд"]]
-        else:
-            urls = [POPULAR_CATEGORIES[n] for n in selected if n in POPULAR_CATEGORIES]
+        urls = [POPULAR_CATEGORIES[n] for n in selected if n in POPULAR_CATEGORIES]
+        if not urls:
+            urls = ["__ALL__"]
 
     try:
-        items = ricardo_collect_items(urls=urls, max_items=max_items)
-        logger.info("Apify returned %s items before filters for user %s", len(items), user_id)
+        items = await ricardo_collect_items(urls=urls, max_items=max_items, fetch_sellers=True)
         items = filter_by_blacklists(user_id, items)
         items = filter_new_only(user_id, items)
 
         st = get_user_state(user_id)
         sent_links = st.get("sent_links", [])
         for it in items:
-            link = it.get("item_link")
-            if link:
-                sent_links.append(link)
+            lk = it.get("item_link")
+            if lk:
+                sent_links.append(lk)
         st["sent_links"] = sent_links[-3000:]
         set_user_state(user_id, st)
 
@@ -261,21 +263,18 @@ async def run_search_and_send(app, chat_id: int, user_id: int, one_off: bool = F
         path = save_json_result(items, user_id)
         await app.bot.send_document(chat_id, document=open(path, "rb"))
     except Exception as e:
-        logger.exception("Search failed for user %s: %s", user_id, e)
+        logger.exception("Search failed: %s", e)
         if one_off:
             await app.bot.send_message(chat_id, f"Ошибка поиска: {e}")
 
 def _remove_job(context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
-    jobs = context.job_queue.get_jobs_by_name(name)
-    for j in jobs:
+    for j in context.job_queue.get_jobs_by_name(name):
         j.schedule_removal()
-
-RUN_GUARD = "_running_users"
 
 async def job_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = context.job.data["chat_id"]
     user_id = context.job.data["user_id"]
-    running = context.application.bot_data.setdefault(RUN_GUARD, set())
+    running = context.application.bot_data.setdefault("_running_users", set())
     if user_id in running:
         return
     running.add(user_id)
@@ -287,8 +286,7 @@ async def job_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-    s = get_user_settings(user_id)
-    set_user_settings(user_id, s)
+    set_user_settings(user_id, get_user_settings(user_id))
     await update.message.reply_text("Готов ✅", reply_markup=main_menu_kb(user_id, owner_id))
     return MAIN
 
@@ -304,8 +302,8 @@ async def text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_name = f"watch_{user_id}"
     _remove_job(context, job_name)
 
-    interval = int(get_user_settings(user_id).get("interval_sec", 60))
-    context.job_queue.run_repeating(job_tick, interval=interval, first=1, name=job_name, data={"chat_id": chat_id, "user_id": user_id})
+    interval = int(os.getenv("DEFAULT_INTERVAL_SEC", "30"))
+    context.job_queue.run_repeating(job_tick, interval=interval, first=2, name=job_name, data={"chat_id": chat_id, "user_id": user_id})
     await update.message.reply_text("Мониторинг включен ✅", reply_markup=main_menu_kb(user_id, owner_id))
     await run_search_and_send(context.application, chat_id=chat_id, user_id=user_id, one_off=True)
     return MAIN
@@ -313,7 +311,6 @@ async def text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-
     _remove_job(context, f"watch_{user_id}")
     st = get_user_state(user_id)
     st["running"] = False
@@ -369,8 +366,7 @@ async def bl_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def bl_add_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    s = get_user_settings(user_id)
-    mode = s.get("edit_blacklist_mode", "personal")
+    mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     mode_txt = "ОБЩИЙ" if mode == "general" else "ЛИЧНЫЙ"
     await update.message.reply_text(f"Введи имя продавца для добавления в {mode_txt} ЧС:", reply_markup=ReplyKeyboardRemove())
     return BL_ADD_NAME
@@ -378,16 +374,14 @@ async def bl_add_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bl_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     name = (update.message.text or "").strip()
-    s = get_user_settings(user_id)
-    mode = s.get("edit_blacklist_mode", "personal")
+    mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     add_to_blacklist(user_id, name, mode)
     await update.message.reply_text("✅ Добавлено.", reply_markup=blacklist_menu_kb(user_id))
     return BL_MENU
 
 async def bl_remove_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    s = get_user_settings(user_id)
-    mode = s.get("edit_blacklist_mode", "personal")
+    mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     mode_txt = "ОБЩИЙ" if mode == "general" else "ЛИЧНЫЙ"
     await update.message.reply_text(f"Введи имя продавца для удаления из {mode_txt} ЧС:", reply_markup=ReplyKeyboardRemove())
     return BL_REMOVE_NAME
@@ -395,8 +389,7 @@ async def bl_remove_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bl_remove_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     name = (update.message.text or "").strip()
-    s = get_user_settings(user_id)
-    mode = s.get("edit_blacklist_mode", "personal")
+    mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     remove_from_blacklist(user_id, name, mode)
     await update.message.reply_text("✅ Удалено.", reply_markup=blacklist_menu_kb(user_id))
     return BL_MENU
@@ -407,13 +400,13 @@ async def text_cats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CATS_MENU
 
 def _clean_label(text: str) -> str:
-    return text.replace("✅", "").strip()
+    return (text or "").replace("✅", "").strip()
 
 async def cats_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     t = (update.message.text or "").strip()
-
     s = get_user_settings(user_id)
+
     if _clean_label(t) == BTN_CATS_ALL:
         s["cats_mode"] = "all"
         s["cats_selected"] = []
@@ -454,9 +447,46 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
     if user_id != owner_id:
         return
-    st = load_state()
-    users = len(st.keys())
-    await update.message.reply_text(f"Админ панель 🛠\nUsers: {users}", reply_markup=main_menu_kb(user_id, owner_id))
+    await update.message.reply_text("Админ панель 🛠", reply_markup=admin_menu_kb())
+    return ADMIN_MENU
+
+async def admin_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = (update.message.text or "").strip()
+    if t == BTN_PROXIES:
+        await update.message.reply_text("Прокси 🛡", reply_markup=proxies_menu_kb())
+        return ADMIN_MENU
+    if t == BTN_BACK:
+        user_id = update.effective_user.id
+        owner_id = int(os.getenv("OWNER_ID", "0") or "0")
+        await update.message.reply_text("Ок.", reply_markup=main_menu_kb(user_id, owner_id))
+        return MAIN
+    return ADMIN_MENU
+
+async def proxy_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = (update.message.text or "").strip()
+    if t == BTN_PX_SET:
+        await update.message.reply_text("Вставь список SOCKS5 прокси (каждый с новой строки):", reply_markup=ReplyKeyboardRemove())
+        return PX_SET
+    if t == BTN_PX_SHOW:
+        prox = proxy_manager.get_proxies()
+        txt = "Текущие прокси:\n" + ("\n".join(prox) if prox else "(пусто)")
+        await update.message.reply_text(txt, reply_markup=proxies_menu_kb())
+        return ADMIN_MENU
+    if t == BTN_PX_CLEAR:
+        proxy_manager.clear_proxies()
+        await update.message.reply_text("✅ Очищено", reply_markup=proxies_menu_kb())
+        return ADMIN_MENU
+    if t == BTN_BACK:
+        await update.message.reply_text("Ок.", reply_markup=proxies_menu_kb())
+        return ADMIN_MENU
+    return ADMIN_MENU
+
+async def proxy_set_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text or ""
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    n = proxy_manager.set_proxies(lines)
+    await update.message.reply_text(f"✅ Сохранено прокси: {n}", reply_markup=proxies_menu_kb())
+    return ADMIN_MENU
 
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -479,6 +509,7 @@ def main():
     if not token:
         raise SystemExit("BOT_TOKEN is missing")
 
+    owner_id = int(os.getenv("OWNER_ID", "0") or "0")
     webhook_base = os.getenv("WEBHOOK_BASE_URL", "").strip()
     webhook_path = os.getenv("WEBHOOK_PATH", "/telegram").strip()
     port = int(os.getenv("PORT", "8080"))
@@ -498,9 +529,7 @@ def main():
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_ADMIN)}$"), admin_panel),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
-            SET_COUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, set_count),
-            ],
+            SET_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_count)],
             BL_MENU: [
                 MessageHandler(filters.TEXT & filters.Regex(rf"^{re.escape(BTN_BL_MODE)}"), bl_toggle_mode),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BL_SHOW)}$"), bl_show),
@@ -508,19 +537,20 @@ def main():
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BL_REMOVE)}$"), bl_remove_prompt),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
-            BL_ADD_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, bl_add_name),
+            BL_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bl_add_name)],
+            BL_REMOVE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bl_remove_name)],
+            CATS_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, cats_click)],
+            ADMIN_MENU: [
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_PROXIES)}$"), admin_click),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_PX_SET)}$"), proxy_menu_click),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_PX_SHOW)}$"), proxy_menu_click),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_PX_CLEAR)}$"), proxy_menu_click),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), admin_click),
             ],
-            BL_REMOVE_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, bl_remove_name),
-            ],
-            CATS_MENU: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, cats_click),
-            ],
+            PX_SET: [MessageHandler(filters.TEXT & ~filters.COMMAND, proxy_set_text)],
         },
         fallbacks=[CommandHandler("start", cmd_start)],
     )
-
     application.add_handler(conv)
 
     if webhook_base:
