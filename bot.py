@@ -76,20 +76,14 @@ async def ricardo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Запрос пустой. Пример: /ricardo Max Mustermann")
         return
 
-    # Progress message
     msg = await update.message.reply_text("Начал работу ✅\nСобираю объявления: 0/30")
 
-    # Collect
+    # main
     items = ricardo_collect_items(query=query, pages=3, max_items=30)
 
-    # Update progress
     await msg.edit_text(f"Начал работу ✅\nСобираю объявления: {len(items)}/30")
 
-    if fmt == "txt":
-        path = save_txt(items, query)
-    else:
-        path = save_json(items, query)
-
+    path = save_txt(items, query) if fmt == "txt" else save_json(items, query)
     await update.message.reply_document(document=open(path, "rb"))
 
 def main():
@@ -100,7 +94,7 @@ def main():
 
     app = ApplicationBuilder().token(token).build()
 
-    # Clear webhook on startup to avoid polling conflicts
+    # On start: clear webhook + pending updates (helps avoid conflicts)
     async def _on_start(app_):
         try:
             await app_.bot.delete_webhook(drop_pending_updates=True)
@@ -112,7 +106,6 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("ricardo", ricardo_cmd))
 
-    # Polling, drop pending updates
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
