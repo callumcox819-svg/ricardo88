@@ -18,7 +18,7 @@ POPULAR_CATEGORIES: Dict[str, str] = {
     "Компьютеры и сети": "https://www.ricardo.ch/de/c/computer-netzwerk-417/",
     "Часы": "https://www.ricardo.ch/de/c/uhren-schmuck-408/",
     "Косметика и уход": "https://www.ricardo.ch/de/c/beauty-gesundheit-412/",
-    "Все подряд": "https://www.ricardo.ch/de/",
+    "Все подряд": "https://www.ricardo.ch/de/s/?sort=createdDateDesc",
 }
 
 def apify_run(urls: List[str], max_items: int) -> List[Dict[str, Any]]:
@@ -50,8 +50,11 @@ def normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def filter_no_bids_buy_now(it: Dict[str, Any]) -> bool:
-    # Strict by TZ: no bids + buy now
+    # Strict TZ: fixed-price only (Buy Now) and NO auction and NO bids
     if not it.get("has_buy_now"):
+        return False
+    # Exclude auctions entirely (even if bids are 0)
+    if it.get("has_auction") is True:
         return False
     try:
         bids = int(it.get("bids_count") or 0)
