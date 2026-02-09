@@ -205,15 +205,29 @@ def ricardo_parse_ad_page(url: str) -> Optional[Dict]:
 
 def ricardo_search_links(query: str, page: int = 1, limit: int = 120) -> List[str]:
     q_raw = (query or "").strip()
+
+    # Ricardo "all listings" view does NOT reliably show items at /de/s/ .
+    # For the no-query mode (as in your TZ), use a real listing endpoint with sorting.
     if not q_raw:
-        url = f"{BASE_URL}/de/s/"
+        # newest first
+        params = {"sort": "createdDateDesc"}
+        if page > 1:
+            params["page"] = str(page)
+        url = f"{BASE_URL}/de/s/?" + "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
     else:
         q = quote(q_raw)
         url = f"{BASE_URL}/de/s/{q}/"
-    if page > 1:
-        url += f"?page={page}"
+        if page > 1:
+            url += f"?page={page}"
 
     html = http_get(url)
+    # fallback: if no html in no-query mode, try plain /de/s/?page=..
+    if not html and not q_raw:
+        url2 = f"{BASE_URL}/de/s/"
+        if page > 1:
+            url2 += f"?page={page}"
+        html = http_get(url2)
+
     if not html:
         return []
 
