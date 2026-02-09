@@ -1,11 +1,10 @@
 import os
 import json
 import logging
-from dataclasses import dataclass
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
-import re
+from typing import Dict, List, Any
 
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -36,13 +35,13 @@ SETTINGS_FILE = PROFILE_DIR / "settings.json"
 BLACKLIST_FILE = PROFILE_DIR / "blacklist.json"
 STATE_FILE = PROFILE_DIR / "state.json"
 
-# ----- UI Text -----
+# --------- UI ---------
 BTN_START = "Старт ✅"
 BTN_STOP = "Стоп ⛔"
 BTN_SETTINGS = "Настройки ⚙️"
+BTN_ADMIN = "Админ панель 🛠"
 BTN_BACK = "Назад ↩️"
 
-BTN_QUERY = "Запрос 🔎"
 BTN_COUNT = "Кол-во объявлений 📦"
 BTN_BLACKLIST = "ЧС 🚫"
 
@@ -51,17 +50,20 @@ BTN_BL_SHOW = "Показать ЧС"
 BTN_BL_ADD = "Добавить в ЧС"
 BTN_BL_REMOVE = "Удалить из ЧС"
 
+BTN_AD_STATUS = "Статус 📊"
+BTN_AD_SHOW_GBL = "Показать общий ЧС"
+BTN_AD_CLEAR_GBL = "Очистить общий ЧС"
+
 COUNT_CHOICES = ["5", "10", "20", "30"]
 
 # Conversation states
-MAIN, SET_QUERY, SET_COUNT, BL_MENU, BL_SET_MODE, BL_ADD_NAME, BL_REMOVE_NAME = range(7)
+MAIN, SET_COUNT, BL_MENU, BL_ADD_NAME, BL_REMOVE_NAME, ADMIN_MENU = range(6)
 
 DEFAULT_USER_SETTINGS = {
-    "query": "",
     "max_items": 30,
     "pages": 3,
-    "interval_sec": 600,   # 10 min
-    "edit_blacklist_mode": "personal",  # which list user edits in UI: personal/general
+    "interval_sec": 600,              # 10 min
+    "edit_blacklist_mode": "personal" # what user edits in ЧС menu
 }
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -96,7 +98,7 @@ def set_user_settings(user_id: int, new_settings: Dict[str, Any]) -> None:
     save_settings(all_s)
 
 def load_blacklists() -> Dict[str, Any]:
-    # {"general": [...], "personal": {"user_id": [...]}}
+    # {"general": [...], "personal": {"user_id": [...]} }
     return _load_json(BLACKLIST_FILE, {"general": [], "personal": {}})
 
 def save_blacklists(data: Dict[str, Any]) -> None:
@@ -140,8 +142,12 @@ def remove_from_blacklist(user_id: int, name: str, mode: str) -> None:
             lst.remove(name)
     save_blacklists(bl)
 
+def clear_general_blacklist() -> None:
+    bl = load_blacklists()
+    bl["general"] = []
+    save_blacklists(bl)
+
 def load_state() -> Dict[str, Any]:
-    # {"user_id": {"sent_links": [...], "running": bool}}
     return _load_json(STATE_FILE, {})
 
 def save_state(data: Dict[str, Any]) -> None:
@@ -159,11 +165,17 @@ def set_user_state(user_id: int, new_state: Dict[str, Any]) -> None:
     st[str(user_id)] = new_state
     save_state(st)
 
-def main_menu_kb() -> ReplyKeyboardMarkup:
+def safe_filename(s: str) -> str:
+    s = (s or "").strip().replace(" ", "_")
+    return "".join(ch for ch in s if ch.isalnum() or ch in ("_", "-", "."))[:80] or "all"
+
+def main_menu_kb(is_admin: bool) -> ReplyKeyboardMarkup:
+    if is_admin:
+        return ReplyKeyboardMarkup([[BTN_START, BTN_STOP], [BTN_SETTINGS, BTN_ADMIN]], resize_keyboard=True)
     return ReplyKeyboardMarkup([[BTN_START, BTN_STOP], [BTN_SETTINGS]], resize_keyboard=True)
 
 def settings_menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup([[BTN_QUERY, BTN_COUNT], [BTN_BLACKLIST], [BTN_BACK]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([[BTN_COUNT], [BTN_BLACKLIST], [BTN_BACK]], resize_keyboard=True)
 
 def count_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([COUNT_CHOICES, [BTN_BACK]], resize_keyboard=True)
@@ -173,41 +185,26 @@ def blacklist_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
     mode = s.get("edit_blacklist_mode", "personal")
     mode_txt = "личный" if mode == "personal" else "общий"
     return ReplyKeyboardMarkup(
-        [[f"{BTN_BL_MODE}: {mode_txt}"], [BTN_BL_SHOW], [BTN_BL_ADD, BTN_BL_REMOVE], [BTN_BACK]],
+        [[f"{BTN_BL_MODE}: {mode_txt}"],
+         [BTN_BL_SHOW],
+         [BTN_BL_ADD, BTN_BL_REMOVE],
+         [BTN_BACK]],
         resize_keyboard=True,
     )
 
-def safe_filename(s: str) -> str:
-    s = (s or "").strip().replace(" ", "_")
-    return "".join(ch for ch in s if ch.isalnum() or ch in ("_", "-", "."))[:80] or "query"
+def admin_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([[BTN_AD_STATUS], [BTN_AD_SHOW_GBL, BTN_AD_CLEAR_GBL], [BTN_BACK]], resize_keyboard=True)
 
-def save_json_result(items: List[Dict[str, Any]], user_id: int, query: str) -> Path:
+def save_json_result(items: List[Dict[str, Any]], user_id: int) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = f"ricardo_{user_id}_{safe_filename(query)}_{ts}.json"
+    name = f"ricardo_{user_id}_all_{ts}.json"
     path = RESULTS_DIR / name
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"items": items}, f, ensure_ascii=False, indent=2)
     return path
 
-def save_txt_result(items: List[Dict[str, Any]], user_id: int, query: str) -> Path:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = f"ricardo_{user_id}_{safe_filename(query)}_{ts}.txt"
-    path = RESULTS_DIR / name
-    lines = []
-    for i, it in enumerate(items, 1):
-        lines.append(f"{i}. {it.get('item_title','')}")
-        lines.append(f"   PRICE: {it.get('item_price','')}")
-        lines.append(f"   SELLER: {it.get('item_person_name','')}")
-        lines.append(f"   LINK: {it.get('item_link','')}")
-        lines.append(f"   PHOTO: {it.get('item_photo','')}")
-        lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
-
 def filter_by_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    general = set(get_blacklist_general())
-    personal = set(get_blacklist_personal(user_id))
-    blocked = general.union(personal)
+    blocked = set(get_blacklist_general()) | set(get_blacklist_personal(user_id))
     out = []
     for it in items:
         seller = (it.get("item_person_name") or "").strip()
@@ -228,30 +225,23 @@ def filter_new_only(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str,
 
 async def run_search_and_send(app, chat_id: int, user_id: int, one_off: bool = False) -> None:
     s = get_user_settings(user_id)
-    query = (s.get("query") or "").strip()
-    if not query:
-        if one_off:
-            await app.bot.send_message(chat_id, "Сначала задай запрос в Настройках → Запрос 🔎")
-        return
-
     max_items = int(s.get("max_items", 30))
     pages = int(s.get("pages", 3))
 
     try:
-        items = ricardo_collect_items(query=query, pages=pages, max_items=max_items)
+        # IMPORTANT: no query – we scan /de/s/ (all listings) and then apply your TZ filters in parser
+        items = ricardo_collect_items(query="", pages=pages, max_items=max_items)
         items = filter_by_blacklists(user_id, items)
         items = filter_new_only(user_id, items)
 
-        # Update sent links state (remember what we sent)
+        # Update sent links state
         st = get_user_state(user_id)
         sent_links = st.get("sent_links", [])
         for it in items:
             link = it.get("item_link")
             if link:
                 sent_links.append(link)
-        # keep last 2000 to avoid huge file
-        sent_links = sent_links[-2000:]
-        st["sent_links"] = sent_links
+        st["sent_links"] = sent_links[-2000:]
         set_user_state(user_id, st)
 
         if not items:
@@ -259,7 +249,7 @@ async def run_search_and_send(app, chat_id: int, user_id: int, one_off: bool = F
                 await app.bot.send_message(chat_id, "Новых объявлений нет ✅")
             return
 
-        path = save_json_result(items, user_id, query)
+        path = save_json_result(items, user_id)
         await app.bot.send_document(chat_id, document=open(path, "rb"))
     except Exception as e:
         logger.exception("Search failed for user %s: %s", user_id, e)
@@ -273,31 +263,32 @@ def _remove_job(context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
 
 async def job_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
-    chat_id = job.data["chat_id"]
-    user_id = job.data["user_id"]
-    await run_search_and_send(context.application, chat_id=chat_id, user_id=user_id, one_off=False)
+    await run_search_and_send(
+        context.application,
+        chat_id=job.data["chat_id"],
+        user_id=job.data["user_id"],
+        one_off=False,
+    )
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     s = get_user_settings(user_id)
-    set_user_settings(user_id, s)  # persist defaults
+    set_user_settings(user_id, s)
+
+    is_admin = bool(context.application.bot_data.get("OWNER_ID") == user_id)
+
     await update.message.reply_text(
         "Ricardo Bot ✅\n"
         "Нажми Старт ✅ чтобы включить мониторинг.\n"
-        "В Настройках задай запрос и кол-во объявлений.\n",
-        reply_markup=main_menu_kb(),
+        "Настройки: выбери кол-во объявлений, ЧС.\n",
+        reply_markup=main_menu_kb(is_admin),
     )
     return MAIN
 
 async def text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-
-    s = get_user_settings(user_id)
-    query = (s.get("query") or "").strip()
-    if not query:
-        await update.message.reply_text("Сначала задай Запрос 🔎 в Настройках.", reply_markup=settings_menu_kb())
-        return MAIN
+    is_admin = bool(context.application.bot_data.get("OWNER_ID") == user_id)
 
     st = get_user_state(user_id)
     st["running"] = True
@@ -306,6 +297,7 @@ async def text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_name = f"watch_{user_id}"
     _remove_job(context, job_name)
 
+    s = get_user_settings(user_id)
     interval = int(s.get("interval_sec", 600))
     context.job_queue.run_repeating(
         job_tick,
@@ -315,13 +307,14 @@ async def text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data={"chat_id": chat_id, "user_id": user_id},
     )
 
-    await update.message.reply_text("Мониторинг включен ✅", reply_markup=main_menu_kb())
-    # immediate one-off run (so user sees something right away if exists)
+    await update.message.reply_text("Мониторинг включен ✅", reply_markup=main_menu_kb(is_admin))
     await run_search_and_send(context.application, chat_id=chat_id, user_id=user_id, one_off=True)
     return MAIN
 
 async def text_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    is_admin = bool(context.application.bot_data.get("OWNER_ID") == user_id)
+
     job_name = f"watch_{user_id}"
     _remove_job(context, job_name)
 
@@ -329,24 +322,11 @@ async def text_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st["running"] = False
     set_user_state(user_id, st)
 
-    await update.message.reply_text("Мониторинг остановлен ⛔", reply_markup=main_menu_kb())
+    await update.message.reply_text("Мониторинг остановлен ⛔", reply_markup=main_menu_kb(is_admin))
     return MAIN
 
 async def text_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Настройки ⚙️", reply_markup=settings_menu_kb())
-    return MAIN
-
-async def text_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введи запрос (например: Имя Фамилия):", reply_markup=ReplyKeyboardRemove())
-    return SET_QUERY
-
-async def set_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    q = (update.message.text or "").strip()
-    s = get_user_settings(user_id)
-    s["query"] = q
-    set_user_settings(user_id, s)
-    await update.message.reply_text(f"✅ Запрос сохранен: {q}", reply_markup=settings_menu_kb())
     return MAIN
 
 async def text_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -388,69 +368,81 @@ async def bl_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt += "\n".join(f"- {x}" for x in gen) if gen else "(пусто)"
     txt += "\n\n🚫 Твой личный ЧС:\n"
     txt += "\n".join(f"- {x}" for x in per) if per else "(пусто)"
+
     await update.message.reply_text(txt, reply_markup=blacklist_menu_kb(user_id))
     return BL_MENU
 
 async def bl_add_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    s = get_user_settings(user_id)
-    mode = s.get("edit_blacklist_mode", "personal")
+    mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     mode_txt = "ОБЩИЙ" if mode == "general" else "ЛИЧНЫЙ"
-    await update.message.reply_text(f"Введи имя продавца для добавления в {mode_txt} ЧС:", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        f"Введи имя продавца для добавления в {mode_txt} ЧС:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return BL_ADD_NAME
 
 async def bl_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     name = (update.message.text or "").strip()
-    s = get_user_settings(user_id)
-    mode = s.get("edit_blacklist_mode", "personal")
+    mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     add_to_blacklist(user_id, name, mode)
     await update.message.reply_text("✅ Добавлено.", reply_markup=blacklist_menu_kb(user_id))
     return BL_MENU
 
 async def bl_remove_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    s = get_user_settings(user_id)
-    mode = s.get("edit_blacklist_mode", "personal")
+    mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     mode_txt = "ОБЩИЙ" if mode == "general" else "ЛИЧНЫЙ"
-    await update.message.reply_text(f"Введи имя продавца для удаления из {mode_txt} ЧС:", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        f"Введи имя продавца для удаления из {mode_txt} ЧС:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return BL_REMOVE_NAME
 
 async def bl_remove_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     name = (update.message.text or "").strip()
-    s = get_user_settings(user_id)
-    mode = s.get("edit_blacklist_mode", "personal")
+    mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     remove_from_blacklist(user_id, name, mode)
     await update.message.reply_text("✅ Удалено.", reply_markup=blacklist_menu_kb(user_id))
     return BL_MENU
 
-async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ок.", reply_markup=main_menu_kb())
-    return MAIN
-
-async def cmd_ricardo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # one-off search by command, independent of monitoring settings
+async def text_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    args = context.args
-    if not args:
-        await update.message.reply_text("Используй: /ricardo Имя Фамилия", reply_markup=main_menu_kb())
-        return
+    owner_id = context.application.bot_data.get("OWNER_ID")
+    if owner_id != user_id:
+        await update.message.reply_text("Нет доступа.")
+        return MAIN
+    await update.message.reply_text("Админ панель 🛠", reply_markup=admin_menu_kb())
+    return ADMIN_MENU
 
-    query = " ".join(args).strip()
-    s = get_user_settings(user_id)
-    # temporarily run with this query, but do not overwrite stored query
-    tmp = s.copy()
-    tmp["query"] = query
-    set_user_settings(user_id, tmp)
+async def admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    st = load_state()
+    running = [uid for uid, data in st.items() if isinstance(data, dict) and data.get("running")]
+    users_total = len(st.keys())
+    await update.message.reply_text(
+        f"📊 Статус\nПользователей: {users_total}\nМониторинг активен у: {len(running)}",
+        reply_markup=admin_menu_kb(),
+    )
+    return ADMIN_MENU
 
-    await update.message.reply_text("Ищу объявления...")
-    await run_search_and_send(context.application, chat_id=chat_id, user_id=user_id, one_off=True)
+async def admin_show_general_bl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    gen = get_blacklist_general()
+    txt = "🚫 Общий ЧС:\n" + ("\n".join(f"- {x}" for x in gen) if gen else "(пусто)")
+    await update.message.reply_text(txt, reply_markup=admin_menu_kb())
+    return ADMIN_MENU
 
-    # restore
-    tmp["query"] = s.get("query", "")
-    set_user_settings(user_id, tmp)
+async def admin_clear_general_bl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_general_blacklist()
+    await update.message.reply_text("✅ Общий ЧС очищен.", reply_markup=admin_menu_kb())
+    return ADMIN_MENU
+
+async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_admin = bool(context.application.bot_data.get("OWNER_ID") == user_id)
+    await update.message.reply_text("Ок.", reply_markup=main_menu_kb(is_admin))
+    return MAIN
 
 def _ensure_webhook_url(webhook_base: str, webhook_path: str) -> str:
     base = webhook_base.strip().rstrip("/")
@@ -467,43 +459,49 @@ def main():
     if not token:
         raise SystemExit("BOT_TOKEN is missing. Set Railway Variable BOT_TOKEN or create .env from .env.example")
 
+    owner_id = int(os.getenv("OWNER_ID", "0") or "0")
+
     webhook_base = os.getenv("WEBHOOK_BASE_URL", "").strip()
     webhook_path = os.getenv("WEBHOOK_PATH", "/telegram").strip()
     port = int(os.getenv("PORT", "8080"))
 
     application = ApplicationBuilder().token(token).build()
+    application.bot_data["OWNER_ID"] = owner_id
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
             MAIN: [
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_START}$"), text_start),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_STOP}$"), text_stop),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_SETTINGS}$"), text_settings),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_QUERY}$"), text_query),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_COUNT}$"), text_count),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_BLACKLIST}$"), text_blacklist),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_BACK}$"), go_back),
-            ],
-            SET_QUERY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, set_query),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_START)}$"), text_start),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_STOP)}$"), text_stop),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_SETTINGS)}$"), text_settings),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_COUNT)}$"), text_count),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BLACKLIST)}$"), text_blacklist),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_ADMIN)}$"), text_admin),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
             SET_COUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, set_count),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_BACK}$"), go_back),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
             BL_MENU: [
                 MessageHandler(filters.TEXT & filters.Regex(rf"^{re.escape(BTN_BL_MODE)}"), bl_toggle_mode),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_BL_SHOW}$"), bl_show),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_BL_ADD}$"), bl_add_prompt),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_BL_REMOVE}$"), bl_remove_prompt),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{BTN_BACK}$"), go_back),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BL_SHOW)}$"), bl_show),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BL_ADD)}$"), bl_add_prompt),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BL_REMOVE)}$"), bl_remove_prompt),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
             BL_ADD_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bl_add_name),
             ],
             BL_REMOVE_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bl_remove_name),
+            ],
+            ADMIN_MENU: [
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_AD_STATUS)}$"), admin_status),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_AD_SHOW_GBL)}$"), admin_show_general_bl),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_AD_CLEAR_GBL)}$"), admin_clear_general_bl),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
         },
         fallbacks=[CommandHandler("start", cmd_start)],
@@ -512,9 +510,7 @@ def main():
     )
 
     application.add_handler(conv)
-    application.add_handler(CommandHandler("ricardo", cmd_ricardo))
 
-    # Startup webhook/polling
     if webhook_base:
         webhook_url = _ensure_webhook_url(webhook_base, webhook_path)
         logger.info("Starting webhook on 0.0.0.0:%s url=%s", port, webhook_url)
@@ -524,7 +520,7 @@ def main():
             url_path=webhook_path.lstrip("/"),
             webhook_url=webhook_url,
             drop_pending_updates=True,
-            bootstrap_retries=-1,  # keep retrying if Telegram temporarily unreachable
+            bootstrap_retries=-1,
         )
     else:
         logger.info("Starting polling (WEBHOOK_BASE_URL is empty)")
