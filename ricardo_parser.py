@@ -1,9 +1,9 @@
 # ricardo_parser.py
-# Strict-ish Ricardo.ch parser per TZ:
+# TZ:
 # - private sellers only (heuristics)
-# - fixed price (Sofort kaufen) / no bids (auction filtered)
+# - fixed price / buy now (Sofort kaufen), no auctions/bids
 # - seller name must be "Name Surname" (2+ words)
-# Output format matches your existing JSON contract.
+# Output format matches your JSON contract.
 
 import re
 import time
@@ -22,7 +22,6 @@ HEADERS = {
     )
 }
 
-# Accept latin + common EU diacritics. Ricardo seller names can be like "Max Müller".
 NAME_SURNAME_RE = re.compile(
     r"^[A-Za-zÀ-ÖØ-öø-ÿÄÖÜäöüß'\-]+\s+[A-Za-zÀ-ÖØ-öø-ÿÄÖÜäöüß'\-]+(?:\s+[A-Za-zÀ-ÖØ-öø-ÿÄÖÜäöüß'\-]+)*$"
 )
@@ -59,7 +58,7 @@ def is_name_surname(seller_name: str) -> bool:
 def is_fixed_price_no_bids(page_text: str) -> bool:
     t = (page_text or "").lower()
 
-    # Must be "buy now" style
+    # Must be "buy now"
     has_buy_now = ("sofort kaufen" in t) or ("sofortkaufen" in t)
 
     # Auction signals
@@ -136,13 +135,10 @@ def extract_seller_name(soup: BeautifulSoup) -> str:
     return ""
 
 def is_private_seller(page_text: str, seller_name: str) -> bool:
-    # Heuristics: if page mentions "gewerblich"/shop/etc -> treat as non-private
     t = (page_text or "").lower()
     commercial_signals = ["gewerblich", "händler", "shop", "firma", "unternehmen", "professional"]
     if any(w in t for w in commercial_signals):
         return False
-
-    # Your strict rule: seller name must look like "Name Surname"
     return is_name_surname(seller_name)
 
 def ricardo_parse_ad_page(url: str) -> Optional[Dict]:
@@ -153,7 +149,6 @@ def ricardo_parse_ad_page(url: str) -> Optional[Dict]:
     soup = soup_from_html(html)
     page_text = soup.get_text(" ", strip=True)
 
-    # TZ filters
     if not is_fixed_price_no_bids(page_text):
         return None
 
@@ -165,7 +160,6 @@ def ricardo_parse_ad_page(url: str) -> Optional[Dict]:
     if not is_private_seller(page_text, seller_name):
         return None
 
-    # Output contract (matches your json example)
     return {
         "item_title": item_title,
         "item_photo": item_photo,
@@ -215,7 +209,13 @@ def ricardo_search_links(query: str, page: int = 1, limit: int = 80) -> List[str
 
     return links
 
-def ricardo_collect_items(query: str, pages: int = 2, per_page_links: int = 80, delay: float = 0.25, max_items: int = 30) -> List[Dict]:
+def ricardo_collect_items(
+    query: str,
+    pages: int = 3,
+    per_page_links: int = 80,
+    delay: float = 0.25,
+    max_items: int = 30
+) -> List[Dict]:
     results: List[Dict] = []
     seen = set()
 
