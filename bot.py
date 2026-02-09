@@ -230,7 +230,8 @@ async def run_search_and_send(app, chat_id: int, user_id: int, one_off: bool = F
     selected = s.get("cats_selected", [])
 
     if mode == "all":
-        urls = [POPULAR_CATEGORIES["Все подряд"]]
+        # "Все подряд" in Apify works best by scraping multiple popular listing URLs
+        urls = [u for k, u in POPULAR_CATEGORIES.items() if k != "Все подряд"]
     else:
         if not selected:
             urls = [POPULAR_CATEGORIES["Все подряд"]]

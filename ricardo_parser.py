@@ -33,10 +33,10 @@ def apify_run(urls: List[str], max_items: int) -> List[Dict[str, Any]]:
     endpoint = f"https://api.apify.com/v2/acts/{ACTOR_ID}/run-sync-get-dataset-items"
     headers = {"Authorization": f"Bearer {token}"}
     payload = {
-        # most actors accept this field name
         "urls": urls,
-        "maxItems": max_items,
-        # keep retries low, actor handles itself
+        "ignore_url_failures": True,
+        "max_items_per_url": max_items,
+        "max_retries_per_url": 2,
     }
     r = requests.post(endpoint, json=payload, headers=headers, timeout=180)
     r.raise_for_status()
