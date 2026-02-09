@@ -3,7 +3,7 @@ import os
 import requests
 from typing import List, Dict, Any
 
-ACTOR_ID = "ecomscrape/ricardo-product-search-scraper"
+ACTOR_ID = "ecomscrape~ricardo-product-search-scraper"
 
 # Popular categories (can be adjusted later)
 POPULAR_CATEGORIES: Dict[str, str] = {
