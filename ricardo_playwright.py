@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-from proxy_manager import next_proxy
+from proxy_manager import next_proxy, get_proxies
 
 POPULAR_CATEGORIES: Dict[str, str] = {
     "Одежда и аксессуары": "https://www.ricardo.ch/de/c/kleider-accessoires-403/",
@@ -107,7 +107,7 @@ def _is_fixed_price(item: dict) -> bool:
 
 async def _fetch_html(url: str, proxy: Optional[str]) -> str:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, proxy={"server": proxy} if proxy else None)
+        browser = await p.chromium.launch(headless=True, proxy=proxy if proxy else None)
         page = await browser.new_page()
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         # wait a bit for next data
@@ -144,51 +144,58 @@ async def ricardo_collect_items(urls: List[str], max_items: int, fetch_sellers: 
     if "__ALL__" in urls:
         urls = [u for k, u in POPULAR_CATEGORIES.items() if k != "Все подряд"]
 
-    proxies_tried = 0
-    proxies_total = 5  # max rotations per run
-    last_err = None
+    # Build try-order: rotate through saved proxies, and always fall back to direct (no proxy) once.
+proxies = get_proxies()
+try_order: List[Optional[dict]] = []
+if proxies:
+    # Try each proxy at most once per run (in rotating order)
+    for _ in range(min(len(proxies), 10)):
+        p = next_proxy()
+        if p and p not in try_order:
+            try_order.append(p)
+# Always try direct at the end
+try_order.append(None)
 
-    while proxies_tried < proxies_total:
-        proxy = next_proxy()
-        proxies_tried += 1
-        try:
-            all_items: List[dict] = []
-            for url in urls:
-                html = await _fetch_html(url, proxy)
-                if _is_cf_page(html):
-                    raise RuntimeError("Cloudflare page detected")
-                nd = _extract_next_data(html)
-                if not nd:
-                    continue
-                cands = _guess_item_dicts(nd)
-                for c in cands:
-                    it = _normalize_item(c)
-                    if it["item_link"]:
-                        all_items.append(it)
+last_err: Optional[Exception] = None
 
-            # Deduplicate by link
-            seen = set()
-            uniq = []
-            for it in all_items:
-                lk = it["item_link"]
-                if not lk or lk in seen:
-                    continue
-                seen.add(lk)
-                uniq.append(it)
+for proxy in try_order:
+    try:
+        all_items: List[dict] = []
+        for url in urls:
+            html = await _fetch_html(url, proxy)
+            if _is_cf_page(html):
+                raise RuntimeError("Cloudflare page detected")
+            nd = _extract_next_data(html)
+            if not nd:
+                continue
+            cands = _guess_item_dicts(nd)
+            for c in cands:
+                it = _normalize_item(c)
+                if it["item_link"]:
+                    all_items.append(it)
 
-            # Filter fixed price
-            filtered = [it for it in uniq if _is_fixed_price(it)]
-            filtered = filtered[:max_items]
+        # Deduplicate by link
+        seen = set()
+        uniq: List[dict] = []
+        for it in all_items:
+            lk = it["item_link"]
+            if not lk or lk in seen:
+                continue
+            seen.add(lk)
+            uniq.append(it)
 
-            if fetch_sellers:
-                # Fetch seller names sequentially to keep stable
-                for it in filtered:
-                    if it["item_link"]:
-                        it["item_person_name"] = await _get_seller_from_detail(it["item_link"], proxy)
+        # Filter fixed price (без ставок)
+        filtered = [it for it in uniq if _is_fixed_price(it)]
+        filtered = filtered[:max_items]
 
-            return filtered
-        except (PWTimeout, Exception) as e:
-            last_err = e
-            continue
+        if fetch_sellers:
+            for it in filtered:
+                if it["item_link"]:
+                    it["item_person_name"] = await _get_seller_from_detail(it["item_link"], proxy)
 
-    raise RuntimeError(f"Failed to scrape after proxy rotation: {last_err}")
+        return filtered
+    except (PWTimeout, Exception) as e:
+        last_err = e
+        continue
+
+raise RuntimeError(f"Failed to scrape (direct/proxy): {last_err}")

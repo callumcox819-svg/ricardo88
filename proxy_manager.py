@@ -2,45 +2,54 @@
 import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse
 
 PROFILE_DIR = Path("Profile")
 PROXIES_FILE = PROFILE_DIR / "proxies.json"
 
 def _load() -> Dict[str, Any]:
     if not PROXIES_FILE.exists():
-        return {"enabled": True, "index": 0, "proxies": []}
+        return {"index": 0, "proxies": []}
     try:
         return json.loads(PROXIES_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {"enabled": True, "index": 0, "proxies": []}
+        return {"index": 0, "proxies": []}
 
 def _save(d: Dict[str, Any]) -> None:
     tmp = PROXIES_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(PROXIES_FILE)
 
-def normalize_proxy(line: str) -> Optional[str]:
-    line = (line or "").strip()
-    if not line:
+def normalize_proxy(line: str) -> Optional[Dict[str, str]]:
+    s = (line or "").strip()
+    if not s:
         return None
-    # Accept: user:pass@host:port
-    if "://" not in line:
-        return "socks5://" + line
-    return line
+    if "://" not in s:
+        s = "socks5://" + s
+    u = urlparse(s)
+    if not u.scheme or not u.hostname or not u.port:
+        return None
+    server = f"{u.scheme}://{u.hostname}:{u.port}"
+    d: Dict[str, str] = {"server": server}
+    if u.username:
+        d["username"] = u.username
+    if u.password:
+        d["password"] = u.password
+    return d
 
 def set_proxies(lines: List[str]) -> int:
-    d = _load()
-    prox = []
+    prox: List[Dict[str, str]] = []
     for ln in lines:
         p = normalize_proxy(ln)
         if p:
             prox.append(p)
+    d = _load()
     d["proxies"] = prox
     d["index"] = 0
     _save(d)
     return len(prox)
 
-def get_proxies() -> List[str]:
+def get_proxies() -> List[Dict[str, str]]:
     return _load().get("proxies", [])
 
 def clear_proxies() -> None:
@@ -49,7 +58,7 @@ def clear_proxies() -> None:
     d["index"] = 0
     _save(d)
 
-def next_proxy() -> Optional[str]:
+def next_proxy() -> Optional[Dict[str, str]]:
     d = _load()
     prox = d.get("proxies", [])
     if not prox:
