@@ -14,7 +14,7 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-from ricardo_playwright import POPULAR_CATEGORIES, ricardo_collect_items
+from ricardo_playwright import POPULAR_CATEGORIES, ricardo_collect_items, proxy_smoke_test
 import proxy_manager
 import admin_store
 
@@ -50,6 +50,7 @@ BTN_ADMIN_BACK = "Назад ↩️"
 BTN_PX_SET = "Задать список прокси"
 BTN_PX_SHOW = "Показать прокси"
 BTN_PX_CLEAR = "Очистить прокси"
+BTN_PX_TEST = "Тест прокси 🧪"
 
 # Blacklist
 BTN_BL_MODE = "Режим ЧС (общий/личный)"
@@ -61,8 +62,6 @@ BTN_BL_REMOVE = "Удалить из ЧС"
 BTN_CATS_ALL = "Все подряд"
 BTN_CATS_CONTINUE = "🔥 Продолжить настройку"
 BTN_CATS_CLEAR = "Очистить выбор"
-
-COUNT_CHOICES = ["5", "10", "20", "30"]
 
 MAIN, SET_COUNT, BL_MENU, BL_ADD_NAME, BL_REMOVE_NAME, CATS_MENU, ADMIN_MENU, ADMIN_ADD_USER, ADMIN_REMOVE_USER, PX_MENU, PX_SET = range(11)
 
@@ -183,7 +182,7 @@ def settings_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def count_menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup([COUNT_CHOICES, [BTN_BACK]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([[BTN_BACK]], resize_keyboard=True)
 
 def blacklist_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
     s = get_user_settings(user_id)
@@ -222,7 +221,7 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
     )
 
 def proxies_menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup([[BTN_PX_SET], [BTN_PX_SHOW, BTN_PX_CLEAR], [BTN_ADMIN_BACK]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([[BTN_PX_SET], [BTN_PX_SHOW, BTN_PX_TEST], [BTN_PX_CLEAR], [BTN_ADMIN_BACK]], resize_keyboard=True)
 
 def save_json_result(items: List[Dict[str, Any]], user_id: int) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -305,6 +304,12 @@ async def job_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     running.add(user_id)
     try:
         await run_search_collect_buffer(context.application, chat_id=chat_id, user_id=user_id, one_off=False)
+    except Exception as e:
+        logger.exception("Background tick failed for user %s: %s", user_id, e)
+        try:
+            await context.application.bot.send_message(chat_id, f"Ошибка поиска: {e}")
+        except Exception:
+            pass
     finally:
         running.discard(user_id)
 
@@ -354,20 +359,26 @@ async def text_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN
 
 async def text_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Выбери сколько объявлений в JSON:", reply_markup=count_menu_kb())
+    await update.message.reply_text("Введи число (сколько объявлений собрать в один JSON). Например: 30", reply_markup=ReplyKeyboardRemove())
     return SET_COUNT
 
 async def set_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     t = (update.message.text or "").strip()
-    if t not in COUNT_CHOICES:
-        await update.message.reply_text("Выбери кнопкой.", reply_markup=count_menu_kb())
+    try:
+        n = int(t)
+    except Exception:
+        await update.message.reply_text("Введи число, например 30.", reply_markup=ReplyKeyboardRemove())
+        return SET_COUNT
+    if n < 1 or n > 200:
+        await update.message.reply_text("Число должно быть от 1 до 200.", reply_markup=ReplyKeyboardRemove())
         return SET_COUNT
     s = get_user_settings(user_id)
-    s["max_items"] = int(t)
+    s["max_items"] = n
     set_user_settings(user_id, s)
-    await update.message.reply_text(f"✅ Теперь в JSON: {t}", reply_markup=settings_menu_kb())
+    await update.message.reply_text(f"✅ Теперь в JSON: {n}", reply_markup=settings_menu_kb())
     return MAIN
+
 
 async def text_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -532,6 +543,16 @@ async def px_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = "Текущие прокси:\n" + ("\n".join(prox) if prox else "(пусто)")
         await update.message.reply_text(txt, reply_markup=proxies_menu_kb())
         return PX_MENU
+
+    if t == BTN_PX_TEST:
+        prox = proxy_manager.get_proxies()
+        p = prox[0] if prox else None
+        ok, details = await proxy_smoke_test(p)
+        if ok:
+            await update.message.reply_text(f"✅ Прокси ОК\n{details}", reply_markup=proxies_menu_kb())
+        else:
+            await update.message.reply_text(f"❌ Прокси НЕ работает с Railway\n{details}", reply_markup=proxies_menu_kb())
+        return PX_MENU
     if t == BTN_PX_CLEAR:
         proxy_manager.clear_proxies()
         await update.message.reply_text("✅ Очищено", reply_markup=proxies_menu_kb())
@@ -563,6 +584,14 @@ def _ensure_webhook_url(webhook_base: str, webhook_path: str) -> str:
         path = "/" + path
     return base + path
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled exception in handler", exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_chat:
+            await context.bot.send_message(update.effective_chat.id, f"Ошибка: {context.error}")
+    except Exception:
+        pass
+
 def main():
     load_dotenv()
     token = os.getenv("BOT_TOKEN", "").strip()
@@ -575,6 +604,7 @@ def main():
     port = int(os.getenv("PORT", "8080"))
 
     application = ApplicationBuilder().token(token).build()
+    application.add_error_handler(on_error)
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],

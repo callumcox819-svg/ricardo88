@@ -101,13 +101,13 @@ def _is_fixed_price_no_bids(item: dict) -> bool:
 
 async def _fetch_html(url: str, proxy_url: Optional[str]) -> str:
     async with async_playwright() as p:
-        launch_kwargs = {"headless": True}
+        launch_kwargs = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
         if proxy_url:
             # IMPORTANT: Playwright expects dict with server str
             launch_kwargs["proxy"] = {"server": proxy_url}
         browser = await p.chromium.launch(**launch_kwargs)
         page = await browser.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=90000)
         try:
             await page.wait_for_selector("script#__NEXT_DATA__", timeout=15000)
         except Exception:
@@ -151,6 +151,7 @@ async def ricardo_collect_items(urls: List[str], max_items: int, fetch_sellers: 
     # rotate proxies up to len(proxies) times (but cap to 8)
     for _ in range(8):
         proxy_url = next_proxy()
+        _last_proxy_used = proxy_url
         try:
             collected: List[dict] = []
             for url in urls:
@@ -190,4 +191,4 @@ async def ricardo_collect_items(urls: List[str], max_items: int, fetch_sellers: 
             last_err = e
             continue
 
-    raise RuntimeError(f"Failed to scrape after proxy rotation: {last_err}")
+    raise RuntimeError(f"Failed to scrape after proxy rotation (last_proxy={_last_proxy_used}): {last_err}")
