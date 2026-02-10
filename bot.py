@@ -1,24 +1,22 @@
+\
 import os
 import re
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, Any, List
 
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ConversationHandler,
-    ContextTypes,
-    filters,
+    ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
+    ContextTypes, filters
 )
 
 from ricardo_playwright import POPULAR_CATEGORIES, ricardo_collect_items
 import proxy_manager
+import admin_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ricardo_bot")
@@ -29,9 +27,8 @@ RESULTS_DIR = Path("Results"); RESULTS_DIR.mkdir(exist_ok=True)
 SETTINGS_FILE = PROFILE_DIR / "settings.json"
 BLACKLIST_FILE = PROFILE_DIR / "blacklist.json"
 STATE_FILE = PROFILE_DIR / "state.json"
-ALLOWED_USERS_FILE = PROFILE_DIR / "allowed_users.json"
 
-# ---------------- Buttons ----------------
+# Buttons
 BTN_START = "Старт ✅"
 BTN_STOP = "Стоп ⛔"
 BTN_SETTINGS = "Настройки ⚙️"
@@ -42,52 +39,40 @@ BTN_COUNT = "Кол-во объявлений 📦"
 BTN_CATS = "Категории 📂"
 BTN_BLACKLIST = "ЧС 🚫"
 
-# Blacklist submenu
+# Admin
+BTN_ADD_USER = "Добавить юзера ➕"
+BTN_REMOVE_USER = "Удалить юзера ➖"
+BTN_LIST_USERS = "Список юзеров 📋"
+BTN_PROXIES = "Прокси 🛡"
+BTN_ADMIN_BACK = "Назад ↩️"
+
+# Proxy sub-menu
+BTN_PX_SET = "Задать список прокси"
+BTN_PX_SHOW = "Показать прокси"
+BTN_PX_CLEAR = "Очистить прокси"
+
+# Blacklist
 BTN_BL_MODE = "Режим ЧС (общий/личный)"
 BTN_BL_SHOW = "Показать ЧС"
 BTN_BL_ADD = "Добавить в ЧС"
 BTN_BL_REMOVE = "Удалить из ЧС"
 
-# Categories submenu
+# Cats UI
 BTN_CATS_ALL = "Все подряд"
-BTN_CATS_CLEAR = "Очистить выбор"
 BTN_CATS_CONTINUE = "🔥 Продолжить настройку"
-
-# Admin submenu
-BTN_ADMIN_USERS_ADD = "Добавить юзера ➕"
-BTN_ADMIN_USERS_REMOVE = "Удалить юзера ➖"
-BTN_ADMIN_USERS_LIST = "Список юзеров 📋"
-BTN_PROXIES = "Прокси 🛡"
-
-# Proxies submenu
-BTN_PX_SET = "Задать список прокси"
-BTN_PX_SHOW = "Показать прокси"
-BTN_PX_CLEAR = "Очистить прокси"
+BTN_CATS_CLEAR = "Очистить выбор"
 
 COUNT_CHOICES = ["5", "10", "20", "30"]
 
-# ---------------- Conversation states ----------------
-(
-    MAIN,
-    SET_COUNT,
-    BL_MENU,
-    BL_ADD_NAME,
-    BL_REMOVE_NAME,
-    CATS_MENU,
-    ADMIN_MENU,
-    PX_SET,
-    ADMIN_ADD_USER,
-    ADMIN_REMOVE_USER,
-) = range(10)
+MAIN, SET_COUNT, BL_MENU, BL_ADD_NAME, BL_REMOVE_NAME, CATS_MENU, ADMIN_MENU, ADMIN_ADD_USER, ADMIN_REMOVE_USER, PX_MENU, PX_SET = range(12)
 
-DEFAULT_USER_SETTINGS: Dict[str, Any] = {
-    "max_items": 30,             # how many items in one JSON
-    "cats_mode": "all",          # "all" or "selected"
-    "cats_selected": [],         # list[str] of category names
-    "edit_blacklist_mode": "personal",  # "personal" or "general"
+DEFAULT_USER_SETTINGS = {
+    "max_items": 30,
+    "cats_mode": "all",
+    "cats_selected": [],
+    "edit_blacklist_mode": "personal",
 }
 
-# ---------------- Simple JSON storage ----------------
 def _load_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -101,28 +86,6 @@ def _save_json(path: Path, data: Any) -> None:
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
 
-# ---------------- Allowed users (admin) ----------------
-def load_allowed_users() -> List[int]:
-    data = _load_json(ALLOWED_USERS_FILE, [])
-    out: List[int] = []
-    if isinstance(data, list):
-        for x in data:
-            try:
-                out.append(int(x))
-            except Exception:
-                pass
-    return sorted(set(out))
-
-def save_allowed_users(users: List[int]) -> None:
-    _save_json(ALLOWED_USERS_FILE, sorted(set(int(x) for x in users)))
-
-def is_user_allowed(user_id: int, owner_id: int) -> bool:
-    users = load_allowed_users()
-    if not users:
-        return True
-    return user_id == owner_id or user_id in users
-
-# ---------------- Settings per user ----------------
 def load_settings() -> Dict[str, Dict[str, Any]]:
     return _load_json(SETTINGS_FILE, {})
 
@@ -131,7 +94,7 @@ def save_settings(data: Dict[str, Dict[str, Any]]) -> None:
 
 def get_user_settings(user_id: int) -> Dict[str, Any]:
     all_s = load_settings()
-    s = dict(all_s.get(str(user_id), {}) or {})
+    s = all_s.get(str(user_id), {}).copy()
     for k, v in DEFAULT_USER_SETTINGS.items():
         s.setdefault(k, v)
     return s
@@ -141,7 +104,6 @@ def set_user_settings(user_id: int, s: Dict[str, Any]) -> None:
     all_s[str(user_id)] = s
     save_settings(all_s)
 
-# ---------------- Blacklists: general + personal ----------------
 def load_blacklists() -> Dict[str, Any]:
     return _load_json(BLACKLIST_FILE, {"general": [], "personal": {}})
 
@@ -149,10 +111,10 @@ def save_blacklists(data: Dict[str, Any]) -> None:
     _save_json(BLACKLIST_FILE, data)
 
 def get_blacklist_general() -> List[str]:
-    return load_blacklists().get("general", []) or []
+    return load_blacklists().get("general", [])
 
 def get_blacklist_personal(user_id: int) -> List[str]:
-    return (load_blacklists().get("personal", {}) or {}).get(str(user_id), []) or []
+    return load_blacklists().get("personal", {}).get(str(user_id), [])
 
 def add_to_blacklist(user_id: int, name: str, mode: str) -> None:
     name = (name or "").strip()
@@ -182,7 +144,6 @@ def remove_from_blacklist(user_id: int, name: str, mode: str) -> None:
             lst.remove(name)
     save_blacklists(bl)
 
-# ---------------- Runtime state per user ----------------
 def load_state() -> Dict[str, Any]:
     return _load_json(STATE_FILE, {})
 
@@ -191,10 +152,10 @@ def save_state(data: Dict[str, Any]) -> None:
 
 def get_user_state(user_id: int) -> Dict[str, Any]:
     st = load_state()
-    s = dict(st.get(str(user_id), {}) or {})
+    s = st.get(str(user_id), {}).copy()
     s.setdefault("sent_links", [])
     s.setdefault("running", False)
-    s.setdefault("buffer", [])   # accumulate items until max_items
+    s.setdefault("buffer", [])  # collected items to reach N
     return s
 
 def set_user_state(user_id: int, s: Dict[str, Any]) -> None:
@@ -202,7 +163,15 @@ def set_user_state(user_id: int, s: Dict[str, Any]) -> None:
     st[str(user_id)] = s
     save_state(st)
 
-# ---------------- Keyboards ----------------
+def is_allowed(user_id: int, owner_id: int) -> bool:
+    if user_id == owner_id:
+        return True
+    allowed = admin_store.list_allowed()
+    # if no list set -> allow all (same as your old behavior usually)
+    if not allowed:
+        return True
+    return user_id in allowed
+
 def main_menu_kb(user_id: int, owner_id: int) -> ReplyKeyboardMarkup:
     rows = [[BTN_START, BTN_STOP], [BTN_SETTINGS]]
     if user_id == owner_id:
@@ -225,18 +194,15 @@ def blacklist_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
-def _clean_cat_label(t: str) -> str:
-    return (t or "").replace("✅", "").strip()
-
 def cats_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
     s = get_user_settings(user_id)
     mode = s.get("cats_mode", "all")
     selected = set(s.get("cats_selected", []))
 
     names = [k for k in POPULAR_CATEGORIES.keys() if k != "Все подряд"]
-    rows: List[List[str]] = []
+    rows = []
     for i in range(0, len(names), 2):
-        row: List[str] = []
+        row = []
         for name in names[i:i+2]:
             label = f"✅ {name}" if (mode == "selected" and name in selected) else name
             row.append(label)
@@ -251,48 +217,23 @@ def cats_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
 
 def admin_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[BTN_PROXIES], [BTN_ADMIN_USERS_ADD, BTN_ADMIN_USERS_REMOVE], [BTN_ADMIN_USERS_LIST], [BTN_BACK]],
+        [[BTN_ADD_USER], [BTN_REMOVE_USER], [BTN_LIST_USERS], [BTN_PROXIES], [BTN_ADMIN_BACK]],
         resize_keyboard=True,
     )
 
 def proxies_menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup([[BTN_PX_SET], [BTN_PX_SHOW, BTN_PX_CLEAR], [BTN_BACK]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([[BTN_PX_SET], [BTN_PX_SHOW, BTN_PX_CLEAR], [BTN_ADMIN_BACK]], resize_keyboard=True)
 
-# ---------------- Helpers ----------------
 def save_json_result(items: List[Dict[str, Any]], user_id: int) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = RESULTS_DIR / f"ricardo_{user_id}_{ts}.json"
+    name = f"ricardo_{user_id}_{ts}.json"
+    path = RESULTS_DIR / name
     path.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
-def _format_proxy_list(proxies: List[dict]) -> str:
-    if not proxies:
-        return "(пусто)"
-    out = []
-    for p in proxies:
-        if not isinstance(p, dict):
-            continue
-        server = p.get("server", "")
-        user = p.get("username")
-        pwd = p.get("password")
-        if user and pwd:
-            out.append(f"{server}  {user}:{pwd}")
-        else:
-            out.append(server)
-    return "\n".join(out) if out else "(пусто)"
-
-def _build_urls_from_user_settings(user_id: int) -> List[str]:
-    s = get_user_settings(user_id)
-    mode = s.get("cats_mode", "all")
-    selected = s.get("cats_selected", []) or []
-    if mode == "all":
-        return ["__ALL__"]
-    urls = [POPULAR_CATEGORIES[n] for n in selected if n in POPULAR_CATEGORIES]
-    return urls or ["__ALL__"]
-
-def _apply_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def filter_by_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     blocked = set(get_blacklist_general()) | set(get_blacklist_personal(user_id))
-    out: List[Dict[str, Any]] = []
+    out = []
     for it in items:
         seller = (it.get("item_person_name") or "").strip()
         if seller and seller in blocked:
@@ -300,71 +241,57 @@ def _apply_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[st
         out.append(it)
     return out
 
-def _dedupe_new(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def filter_new_only(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     st = get_user_state(user_id)
-    sent = set(st.get("sent_links", []) or [])
-    buf = st.get("buffer", []) or []
-    in_buf = set([x.get("item_link") for x in buf if isinstance(x, dict)])
-    out: List[Dict[str, Any]] = []
+    sent = set(st.get("sent_links", []))
+    return [it for it in items if it.get("item_link") and it["item_link"] not in sent]
+
+async def run_search_collect_buffer(app, chat_id: int, user_id: int, one_off: bool = False) -> None:
+    s = get_user_settings(user_id)
+    max_items = int(s.get("max_items", 30))
+    mode = s.get("cats_mode", "all")
+    selected = s.get("cats_selected", [])
+
+    if mode == "all":
+        urls = ["__ALL__"]
+    else:
+        urls = [POPULAR_CATEGORIES[n] for n in selected if n in POPULAR_CATEGORIES]
+        if not urls:
+            urls = ["__ALL__"]
+
+    # scrape up to max_items each run (cheap)
+    items = await ricardo_collect_items(urls=urls, max_items=max_items, fetch_sellers=True)
+    items = filter_by_blacklists(user_id, items)
+    items = filter_new_only(user_id, items)
+
+    st = get_user_state(user_id)
+    sent_links = st.get("sent_links", [])
+    buf = st.get("buffer", [])
+
     for it in items:
         lk = it.get("item_link")
-        if not lk or lk in sent or lk in in_buf:
-            continue
-        out.append(it)
-    return out
+        if lk:
+            sent_links.append(lk)
+        buf.append(it)
 
-async def _search_once(user_id: int) -> List[Dict[str, Any]]:
-    s = get_user_settings(user_id)
-    max_items = int(s.get("max_items", 30))
-    # Fetch more than needed to have шанс найти новые
-    fetch_limit = max(60, max_items * 3)
+    st["sent_links"] = sent_links[-5000:]
+    st["buffer"] = buf
+    set_user_state(user_id, st)
 
-    urls = _build_urls_from_user_settings(user_id)
-    items = await ricardo_collect_items(urls=urls, max_items=fetch_limit, fetch_sellers=True)
-    items = _apply_blacklists(user_id, items)
-    items = _dedupe_new(user_id, items)
-    return items
-
-async def run_search_buffer_and_send(app, chat_id: int, user_id: int, one_off: bool) -> None:
-    s = get_user_settings(user_id)
-    max_items = int(s.get("max_items", 30))
-
-    try:
-        new_items = await _search_once(user_id)
-        if not new_items:
-            if one_off:
-                await app.bot.send_message(chat_id, "Новых объявлений нет ✅")
-            return
-
+    # if buffer reached, send exactly N and trim buffer
+    if len(buf) >= max_items:
+        to_send = buf[:max_items]
+        rest = buf[max_items:]
         st = get_user_state(user_id)
-        buf: List[Dict[str, Any]] = st.get("buffer", []) or []
-        buf.extend(new_items)
-
-        # If buffer reached target, send exactly max_items
-        while len(buf) >= max_items:
-            to_send = buf[:max_items]
-            buf = buf[max_items:]
-
-            # mark as sent
-            sent = st.get("sent_links", []) or []
-            for it in to_send:
-                lk = it.get("item_link")
-                if lk:
-                    sent.append(lk)
-            st["sent_links"] = sent[-5000:]
-
-            path = save_json_result(to_send, user_id)
-            await app.bot.send_document(chat_id, document=open(path, "rb"))
-
-        st["buffer"] = buf
+        st["buffer"] = rest
         set_user_state(user_id, st)
 
-    except Exception as e:
-        logger.exception("Search failed for user %s", user_id)
-        if one_off:
-            await app.bot.send_message(chat_id, f"Ошибка поиска: {e}")
+        path = save_json_result(to_send, user_id)
+        await app.bot.send_document(chat_id, document=open(path, "rb"))
+    else:
+        if one_off and not items:
+            await app.bot.send_message(chat_id, "Новых объявлений нет ✅ (коплю до лимита)")
 
-# ---------------- Jobs ----------------
 def _remove_job(context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
     for j in context.job_queue.get_jobs_by_name(name):
         j.schedule_removal()
@@ -372,26 +299,21 @@ def _remove_job(context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
 async def job_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = context.job.data["chat_id"]
     user_id = context.job.data["user_id"]
-
-    running_guard = context.application.bot_data.setdefault("_running_users", set())
-    if user_id in running_guard:
+    running = context.application.bot_data.setdefault("_running_users", set())
+    if user_id in running:
         return
-    running_guard.add(user_id)
+    running.add(user_id)
     try:
-        await run_search_buffer_and_send(context.application, chat_id, user_id, one_off=False)
+        await run_search_collect_buffer(context.application, chat_id=chat_id, user_id=user_id, one_off=False)
     finally:
-        running_guard.discard(user_id)
+        running.discard(user_id)
 
-# ---------------- Handlers ----------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-
-    if not is_user_allowed(user_id, owner_id):
-        await update.message.reply_text("⛔ Доступ запрещён. Напиши админу.")
-        return ConversationHandler.END
-
-    # ensure defaults saved
+    if not is_allowed(user_id, owner_id):
+        await update.message.reply_text("Доступ закрыт.")
+        return MAIN
     set_user_settings(user_id, get_user_settings(user_id))
     await update.message.reply_text("Готов ✅", reply_markup=main_menu_kb(user_id, owner_id))
     return MAIN
@@ -400,56 +322,34 @@ async def text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-
-    if not is_user_allowed(user_id, owner_id):
-        await update.message.reply_text("⛔ Доступ запрещён. Напиши админу.")
+    if not is_allowed(user_id, owner_id):
+        await update.message.reply_text("Доступ закрыт.")
         return MAIN
 
-    st = get_user_state(user_id)
-    st["running"] = True
-    set_user_state(user_id, st)
+    st = get_user_state(user_id); st["running"] = True; set_user_state(user_id, st)
 
     job_name = f"watch_{user_id}"
     _remove_job(context, job_name)
 
-    interval = int(os.getenv("DEFAULT_INTERVAL_SEC", "30"))
-    context.job_queue.run_repeating(
-        job_tick,
-        interval=interval,
-        first=2,
-        name=job_name,
-        data={"chat_id": chat_id, "user_id": user_id},
-    )
-
+    interval = int(os.getenv("DEFAULT_INTERVAL_SEC", "90"))
+    context.job_queue.run_repeating(job_tick, interval=interval, first=2, name=job_name, data={"chat_id": chat_id, "user_id": user_id})
     await update.message.reply_text("Мониторинг включен ✅", reply_markup=main_menu_kb(user_id, owner_id))
-    # immediate run (one-off message if nothing)
-    await run_search_buffer_and_send(context.application, chat_id, user_id, one_off=True)
+    try:
+        await run_search_collect_buffer(context.application, chat_id=chat_id, user_id=user_id, one_off=True)
+    except Exception as e:
+        logger.exception("Search failed: %s", e)
+        await update.message.reply_text(f"Ошибка поиска: {e}")
     return MAIN
 
 async def text_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-
-    if not is_user_allowed(user_id, owner_id):
-        await update.message.reply_text("⛔ Доступ запрещён. Напиши админу.")
-        return MAIN
-
     _remove_job(context, f"watch_{user_id}")
-    st = get_user_state(user_id)
-    st["running"] = False
-    set_user_state(user_id, st)
-
+    st = get_user_state(user_id); st["running"] = False; set_user_state(user_id, st)
     await update.message.reply_text("Мониторинг остановлен ⛔", reply_markup=main_menu_kb(user_id, owner_id))
     return MAIN
 
 async def text_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-
-    if not is_user_allowed(user_id, owner_id):
-        await update.message.reply_text("⛔ Доступ запрещён. Напиши админу.")
-        return MAIN
-
     await update.message.reply_text("Настройки ⚙️", reply_markup=settings_menu_kb())
     return MAIN
 
@@ -466,12 +366,6 @@ async def set_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = get_user_settings(user_id)
     s["max_items"] = int(t)
     set_user_settings(user_id, s)
-
-    # Clear buffer so the next JSON respects new size strictly
-    st = get_user_state(user_id)
-    st["buffer"] = []
-    set_user_state(user_id, st)
-
     await update.message.reply_text(f"✅ Теперь в JSON: {t}", reply_markup=settings_menu_kb())
     return MAIN
 
@@ -510,7 +404,7 @@ async def bl_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = (update.message.text or "").strip()
     mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     add_to_blacklist(user_id, name, mode)
-    await update.message.reply_text("✅ Добавлено", reply_markup=blacklist_menu_kb(user_id))
+    await update.message.reply_text("✅ Добавлено.", reply_markup=blacklist_menu_kb(user_id))
     return BL_MENU
 
 async def bl_remove_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -525,38 +419,41 @@ async def bl_remove_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = (update.message.text or "").strip()
     mode = get_user_settings(user_id).get("edit_blacklist_mode", "personal")
     remove_from_blacklist(user_id, name, mode)
-    await update.message.reply_text("✅ Удалено", reply_markup=blacklist_menu_kb(user_id))
+    await update.message.reply_text("✅ Удалено.", reply_markup=blacklist_menu_kb(user_id))
     return BL_MENU
 
 async def text_cats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await update.message.reply_text("Выбери категории:", reply_markup=cats_menu_kb(user_id))
+    await update.message.reply_text("Выбери категории ✅", reply_markup=cats_menu_kb(user_id))
     return CATS_MENU
+
+def _clean_label(text: str) -> str:
+    return (text or "").replace("✅", "").strip()
 
 async def cats_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     t = (update.message.text or "").strip()
-
     s = get_user_settings(user_id)
-    if t in (BTN_BACK, BTN_CATS_CONTINUE):
-        await update.message.reply_text("Ок.", reply_markup=settings_menu_kb())
-        return MAIN
 
-    if _clean_cat_label(t) == BTN_CATS_CLEAR:
-        s["cats_mode"] = "selected"
-        s["cats_selected"] = []
-        set_user_settings(user_id, s)
-        await update.message.reply_text("✅ Очищено", reply_markup=cats_menu_kb(user_id))
-        return CATS_MENU
-
-    if _clean_cat_label(t) == BTN_CATS_ALL:
+    if _clean_label(t) == BTN_CATS_ALL:
         s["cats_mode"] = "all"
         s["cats_selected"] = []
         set_user_settings(user_id, s)
-        await update.message.reply_text("✅ Теперь: Все подряд", reply_markup=cats_menu_kb(user_id))
+        await update.message.reply_text("✅ Режим: Все подряд", reply_markup=cats_menu_kb(user_id))
         return CATS_MENU
 
-    name = _clean_cat_label(t)
+    if t == BTN_CATS_CLEAR:
+        s["cats_mode"] = "selected"
+        s["cats_selected"] = []
+        set_user_settings(user_id, s)
+        await update.message.reply_text("✅ Выбор очищен", reply_markup=cats_menu_kb(user_id))
+        return CATS_MENU
+
+    if t == BTN_CATS_CONTINUE:
+        await update.message.reply_text("Ок.", reply_markup=settings_menu_kb())
+        return MAIN
+
+    name = _clean_label(t)
     if name in POPULAR_CATEGORIES and name != "Все подряд":
         s["cats_mode"] = "selected"
         sel = set(s.get("cats_selected", []))
@@ -572,7 +469,6 @@ async def cats_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажми кнопку.", reply_markup=cats_menu_kb(user_id))
     return CATS_MENU
 
-# ---------------- Admin panel ----------------
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
@@ -584,131 +480,80 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
+    t = (update.message.text or "").strip()
     if user_id != owner_id:
         return MAIN
 
-    t = (update.message.text or "").strip()
-
-    if t == BTN_PROXIES:
-        await update.message.reply_text("Прокси 🛡", reply_markup=proxies_menu_kb())
-        return ADMIN_MENU
-
-    if t == BTN_ADMIN_USERS_LIST:
-        users = load_allowed_users()
-        txt = "Список юзеров (allowlist):\n" + ("\n".join(str(u) for u in users) if users else "(пусто — доступ всем)")
+    if t == BTN_ADD_USER:
+        await update.message.reply_text("Введи user_id для добавления:", reply_markup=ReplyKeyboardRemove())
+        return ADMIN_ADD_USER
+    if t == BTN_REMOVE_USER:
+        await update.message.reply_text("Введи user_id для удаления:", reply_markup=ReplyKeyboardRemove())
+        return ADMIN_REMOVE_USER
+    if t == BTN_LIST_USERS:
+        lst = admin_store.list_allowed()
+        txt = "Список юзеров:\n" + ("\n".join(str(x) for x in lst) if lst else "(пусто / все разрешены)")
         await update.message.reply_text(txt, reply_markup=admin_menu_kb())
         return ADMIN_MENU
-
-    if t == BTN_ADMIN_USERS_ADD:
-        await update.message.reply_text("Введи Telegram user_id для добавления:", reply_markup=ReplyKeyboardRemove())
-        return ADMIN_ADD_USER
-
-    if t == BTN_ADMIN_USERS_REMOVE:
-        await update.message.reply_text("Введи Telegram user_id для удаления:", reply_markup=ReplyKeyboardRemove())
-        return ADMIN_REMOVE_USER
-
-    if t == BTN_BACK:
+    if t == BTN_PROXIES:
+        await update.message.reply_text("Прокси 🛡", reply_markup=proxies_menu_kb())
+        return PX_MENU
+    if t == BTN_ADMIN_BACK:
         await update.message.reply_text("Ок.", reply_markup=main_menu_kb(user_id, owner_id))
         return MAIN
-
-    await update.message.reply_text("Нажми кнопку.", reply_markup=admin_menu_kb())
     return ADMIN_MENU
 
-async def admin_add_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-    user_id = update.effective_user.id
-    if user_id != owner_id:
-        return MAIN
-
-    t = (update.message.text or "").strip()
     try:
-        uid = int(re.sub(r"\D+", "", t))
+        uid = int((update.message.text or "").strip())
+        admin_store.add_allowed(uid)
+        await update.message.reply_text("✅ Добавлено", reply_markup=admin_menu_kb())
     except Exception:
-        await update.message.reply_text("Нужно число (user_id).", reply_markup=admin_menu_kb())
-        return ADMIN_MENU
-
-    users = load_allowed_users()
-    if uid not in users:
-        users.append(uid)
-        save_allowed_users(users)
-
-    await update.message.reply_text(f"✅ Добавил: {uid}", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Введи число (user_id).", reply_markup=admin_menu_kb())
     return ADMIN_MENU
 
-async def admin_remove_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-    user_id = update.effective_user.id
-    if user_id != owner_id:
-        return MAIN
-
-    t = (update.message.text or "").strip()
+async def admin_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        uid = int(re.sub(r"\D+", "", t))
+        uid = int((update.message.text or "").strip())
+        admin_store.remove_allowed(uid)
+        await update.message.reply_text("✅ Удалено", reply_markup=admin_menu_kb())
     except Exception:
-        await update.message.reply_text("Нужно число (user_id).", reply_markup=admin_menu_kb())
-        return ADMIN_MENU
-
-    users = load_allowed_users()
-    if uid in users:
-        users.remove(uid)
-        save_allowed_users(users)
-
-    await update.message.reply_text(f"✅ Удалил: {uid}", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Введи число (user_id).", reply_markup=admin_menu_kb())
     return ADMIN_MENU
 
-# ---------------- Proxies (admin only) ----------------
-async def proxy_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-    user_id = update.effective_user.id
-    if user_id != owner_id:
-        return MAIN
-
+async def px_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = (update.message.text or "").strip()
-
     if t == BTN_PX_SET:
-        await update.message.reply_text(
-            "Вставь список SOCKS5 прокси (каждый с новой строки).\n"
-            "Формат: user:pass@host:port или socks5://user:pass@host:port",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await update.message.reply_text("Вставь список SOCKS5 прокси (каждый с новой строки):", reply_markup=ReplyKeyboardRemove())
         return PX_SET
-
     if t == BTN_PX_SHOW:
         prox = proxy_manager.get_proxies()
-        await update.message.reply_text("Текущие прокси:\n" + _format_proxy_list(prox), reply_markup=proxies_menu_kb())
-        return ADMIN_MENU
-
+        txt = "Текущие прокси:\n" + ("\n".join(prox) if prox else "(пусто)")
+        await update.message.reply_text(txt, reply_markup=proxies_menu_kb())
+        return PX_MENU
     if t == BTN_PX_CLEAR:
         proxy_manager.clear_proxies()
         await update.message.reply_text("✅ Очищено", reply_markup=proxies_menu_kb())
-        return ADMIN_MENU
-
-    if t == BTN_BACK:
+        return PX_MENU
+    if t == BTN_ADMIN_BACK:
         await update.message.reply_text("Ок.", reply_markup=admin_menu_kb())
         return ADMIN_MENU
+    return PX_MENU
 
-    return ADMIN_MENU
-
-async def proxy_set_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    owner_id = int(os.getenv("OWNER_ID", "0") or "0")
-    user_id = update.effective_user.id
-    if user_id != owner_id:
-        return MAIN
-
+async def px_set_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text or ""
     lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
     n = proxy_manager.set_proxies(lines)
     await update.message.reply_text(f"✅ Сохранено прокси: {n}", reply_markup=proxies_menu_kb())
-    return ADMIN_MENU
+    return PX_MENU
 
-# ---------------- Back ----------------
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     owner_id = int(os.getenv("OWNER_ID", "0") or "0")
     await update.message.reply_text("Ок.", reply_markup=main_menu_kb(user_id, owner_id))
     return MAIN
 
-# ---------------- Webhook helpers ----------------
 def _ensure_webhook_url(webhook_base: str, webhook_path: str) -> str:
     base = webhook_base.strip().rstrip("/")
     if not base.startswith("http"):
@@ -720,16 +565,16 @@ def _ensure_webhook_url(webhook_base: str, webhook_path: str) -> str:
 
 def main():
     load_dotenv()
-
-    bot_token = os.getenv("BOT_TOKEN", "").strip()
-    if not bot_token:
+    token = os.getenv("BOT_TOKEN", "").strip()
+    if not token:
         raise SystemExit("BOT_TOKEN is missing")
 
+    owner_id = int(os.getenv("OWNER_ID", "0") or "0")
     webhook_base = os.getenv("WEBHOOK_BASE_URL", "").strip()
     webhook_path = os.getenv("WEBHOOK_PATH", "/telegram").strip()
     port = int(os.getenv("PORT", "8080"))
 
-    application = ApplicationBuilder().token(bot_token).build()
+    application = ApplicationBuilder().token(token).build()
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
@@ -738,9 +583,6 @@ def main():
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_START)}$"), text_start),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_STOP)}$"), text_stop),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_SETTINGS)}$"), text_settings),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_COUNT)}$"), text_count),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_CATS)}$"), text_cats),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BLACKLIST)}$"), text_blacklist),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_ADMIN)}$"), admin_panel),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
@@ -755,23 +597,20 @@ def main():
             BL_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bl_add_name)],
             BL_REMOVE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bl_remove_name)],
             CATS_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, cats_click)],
-            ADMIN_MENU: [
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_PROXIES)}$"), admin_click),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_ADMIN_USERS_ADD)}$"), admin_click),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_ADMIN_USERS_REMOVE)}$"), admin_click),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_ADMIN_USERS_LIST)}$"), admin_click),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_PX_SET)}$"), proxy_menu_click),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_PX_SHOW)}$"), proxy_menu_click),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_PX_CLEAR)}$"), proxy_menu_click),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), admin_click),
-            ],
-            PX_SET: [MessageHandler(filters.TEXT & ~filters.COMMAND, proxy_set_text)],
-            ADMIN_ADD_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_user_text)],
-            ADMIN_REMOVE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_remove_user_text)],
+            ADMIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_click)],
+            ADMIN_ADD_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_user)],
+            ADMIN_REMOVE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_remove_user)],
+            PX_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, px_menu_click)],
+            PX_SET: [MessageHandler(filters.TEXT & ~filters.COMMAND, px_set_text)],
         },
         fallbacks=[CommandHandler("start", cmd_start)],
     )
     application.add_handler(conv)
+
+    # Settings handlers in MAIN state (keep menu structure like old)
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_COUNT)}$"), text_count))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_CATS)}$"), text_cats))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BLACKLIST)}$"), text_blacklist))
 
     if webhook_base:
         webhook_url = _ensure_webhook_url(webhook_base, webhook_path)
