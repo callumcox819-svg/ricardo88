@@ -21,18 +21,54 @@ def _save(d: Dict[str, Any]) -> None:
     tmp.replace(PROXIES_FILE)
 
 def normalize_proxy(line: str) -> Optional[str]:
-    line = (line or "").strip()
-    if not line:
+    raw = (line or "").strip()
+    if not raw:
         return None
-    # remove accidental spaces
-    line = "".join(line.split())
-    if "://" not in line:
-        # default to socks5
-        return "socks5://" + line
-    # normalize scheme case + socks5h
-    line = line.replace("Sock5://", "socks5://").replace("SOCKS5://", "socks5://")
-    line = line.replace("socks5h://", "socks5://")
-    return line
+
+    # Allow inputs like:
+    #   "HTTPS proxy.example.com:38174:user:pass"
+    #   "proxy.example.com:38174:user:pass"
+    #   "http://user:pass@proxy.example.com:38174"
+    #   "socks5://user:pass@host:port"
+    #   "host:port"
+    # Normalize whitespace but preserve possible "SCHEME <rest>" pattern.
+    raw = " ".join(raw.replace("\t", " ").split())
+
+    scheme: Optional[str] = None
+    rest: str = raw
+    first = raw.split(" ", 1)[0].lower()
+    if first in {"http", "https", "socks5", "socks5h"} and " " in raw:
+        scheme, rest = raw.split(" ", 1)
+        scheme = scheme.lower()
+        rest = rest.strip()
+
+    # Remove any remaining spaces in the payload
+    rest = "".join(rest.split())
+
+    if "://" in rest:
+        scheme2, rest2 = rest.split("://", 1)
+        scheme = (scheme2 or scheme or "").lower()
+        rest = rest2
+
+    if scheme:
+        scheme = scheme.lower().replace("socks5h", "socks5")
+
+    # Accept "host:port:user:pass" (common provider format)
+    # and convert to "scheme://user:pass@host:port"
+    if "@" not in rest:
+        parts = rest.split(":")
+        if len(parts) == 4:
+            host, port, user, pwd = parts
+            scheme_final = scheme or "http"
+            return f"{scheme_final}://{user}:{pwd}@{host}:{port}"
+        if len(parts) == 2:
+            host, port = parts
+            scheme_final = scheme or "socks5"
+            return f"{scheme_final}://{host}:{port}"
+
+    # Already in "user:pass@host:port" form
+    scheme_final = scheme or "socks5"
+    return f"{scheme_final}://{rest}"
 
 def set_proxies(lines: List[str]) -> int:
     prox: List[str] = []
