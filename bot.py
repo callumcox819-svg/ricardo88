@@ -14,7 +14,7 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-from ricardo_parser import POPULAR_CATEGORIES, ricardo_collect_items, proxy_smoke_test
+from api import POPULAR_CATEGORIES, ricardo_collect_items
 import proxy_manager
 import admin_store
 
@@ -240,21 +240,6 @@ def filter_by_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict
         out.append(it)
     return out
 
-
-def filter_unique_sellers(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    st = get_user_state(user_id)
-    sent = set(st.get("sent_sellers", []))
-    out = []
-    for it in items:
-        nm = (it.get("item_person_name") or "").strip()
-        if not nm:
-            out.append(it)
-            continue
-        if nm in sent:
-            continue
-        out.append(it)
-    return out
-
 def filter_new_only(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     st = get_user_state(user_id)
     sent = set(st.get("sent_links", []))
@@ -277,7 +262,6 @@ async def run_search_collect_buffer(app, chat_id: int, user_id: int, one_off: bo
     items = await ricardo_collect_items(urls=urls, max_items=max_items, fetch_sellers=True)
     items = filter_by_blacklists(user_id, items)
     items = filter_new_only(user_id, items)
-    items = filter_unique_sellers(user_id, items)
 
     st = get_user_state(user_id)
     sent_links = st.get("sent_links", [])
@@ -287,13 +271,9 @@ async def run_search_collect_buffer(app, chat_id: int, user_id: int, one_off: bo
         lk = it.get("item_link")
         if lk:
             sent_links.append(lk)
-        nm = (it.get("item_person_name") or "").strip()
-        if nm:
-            st.setdefault("sent_sellers", []).append(nm)
         buf.append(it)
 
     st["sent_links"] = sent_links[-5000:]
-    st["sent_sellers"] = list(dict.fromkeys(st.get("sent_sellers", [])))[-5000:]
     st["buffer"] = buf
     set_user_state(user_id, st)
 
@@ -567,7 +547,7 @@ async def px_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if t == BTN_PX_TEST:
         prox = proxy_manager.get_proxies()
         p = prox[0] if prox else None
-        ok, details = await proxy_smoke_test(p)
+        ok, details = await proxy_manager.proxy_test(p)
         if ok:
             await update.message.reply_text(f"✅ Прокси ОК\n{details}", reply_markup=proxies_menu_kb())
         else:
