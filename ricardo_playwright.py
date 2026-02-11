@@ -1,12 +1,15 @@
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-from proxy_manager import next_proxy
+import requests
+
+from proxy_manager import next_proxy, normalize_proxy
 
 # NOTE:
 # Ricardo has 2 kinds of category pages:
@@ -310,3 +313,30 @@ async def ricardo_collect_items(urls: List[str], max_items: int, fetch_sellers: 
             continue
 
     raise RuntimeError(f"Failed to scrape after proxy rotation (last_proxy={_last_proxy_used}): {last_err}")
+
+
+async def proxy_smoke_test(proxy: str):
+    """Проверка прокси, которую вызывает админ-кнопка "Тест прокси".
+
+    Возвращает (ok, details). Не тянем Playwright, чтобы не делать запуск тяжёлым.
+    """
+    p = normalize_proxy(proxy) or proxy
+    test_url = "https://www.ricardo.ch/robots.txt"
+
+    def _do_request():
+        try:
+            r = requests.get(
+                test_url,
+                timeout=15,
+                proxies={"http": p, "https": p},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            return r.status_code, r.text[:200]
+        except Exception as e:
+            return None, str(e)
+
+    code, info = await asyncio.to_thread(_do_request) if hasattr(asyncio, "to_thread") else (None, "asyncio.to_thread missing")
+    if code is None:
+        return False, f"FAIL: {info}"
+    ok = 200 <= int(code) < 400
+    return ok, f"HTTP {code}: {info}"
