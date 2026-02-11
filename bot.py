@@ -14,7 +14,7 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-from ricardo_playwright import POPULAR_CATEGORIES, ricardo_collect_items, proxy_smoke_test
+from ricardo_api import fetch_search, extract_item_urls, parse_pdp_jsonld
 import proxy_manager
 import admin_store
 
