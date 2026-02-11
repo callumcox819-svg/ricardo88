@@ -54,21 +54,3 @@ def next_proxy() -> Optional[str]:
     d["index"] = (idx + 1) % len(prox)
     _save(d)
     return p
-
-
-import asyncio
-import requests
-
-async def proxy_test(proxy_url: str | None) -> tuple[bool, str]:
-    """
-    Quick check that the proxy works from Railway container.
-    """
-    if not proxy_url:
-        return False, "proxy is empty"
-    proxies = {"http": proxy_url, "https": proxy_url}
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/html,*/*"}
-    try:
-        r = await asyncio.to_thread(requests.get, "https://www.ricardo.ch/de/", headers=headers, proxies=proxies, timeout=25)
-        return (r.status_code == 200), f"status={r.status_code}"
-    except Exception as e:
-        return False, str(e)
