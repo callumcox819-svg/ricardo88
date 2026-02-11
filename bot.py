@@ -4,7 +4,7 @@ import re
 import json
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -15,7 +15,7 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-from ricardo_playwright import POPULAR_CATEGORIES, ricardo_collect_items
+from ricardo_playwright import POPULAR_CATEGORIES, ricardo_collect_items, proxy_smoke_test
 import proxy_manager
 import admin_store
 
@@ -235,7 +235,7 @@ def filter_by_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict
     blocked = set(get_blacklist_general()) | set(get_blacklist_personal(user_id))
     out = []
     for it in items:
-        seller = (it.get("item_person_name") or "").strip()
+        seller = ((it.get("seller", {}) or {}).get("name") or it.get("item_person_name") or "").strip()
         if seller and seller in blocked:
             continue
         out.append(it)
@@ -244,7 +244,47 @@ def filter_by_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict
 def filter_new_only(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     st = get_user_state(user_id)
     sent = set(st.get("sent_links", []))
-    return [it for it in items if it.get("item_link") and it["item_link"] not in sent]
+    return [it for it in items if (it.get("url") or it.get("item_link")) and (it.get("url") or it.get("item_link")) not in sent]
+
+def filter_unique_sellers(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep only 1 item per seller name (best-effort)."""
+    seen = set()
+    out = []
+    for it in items:
+        seller = (it.get("seller", {}) or {}).get("name") or it.get("item_person_name") or ""
+        seller = seller.strip()
+        if not seller:
+            # if no seller info, allow but still avoid spamming: treat as unique by url
+            key = it.get("url") or it.get("item_link") or id(it)
+        else:
+            key = seller.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
+
+def filter_last_hours(items: List[Dict[str, Any]], hours: int = 12) -> List[Dict[str, Any]]:
+    """Filter by published_at if available; if missing/unknown, keep the item."""
+    now = datetime.utcnow()
+    out = []
+    for it in items:
+        pa = it.get("published_at") or ""
+        if not pa:
+            out.append(it)
+            continue
+        try:
+            # ISO like 2026-02-11T12:34:56+00:00
+            dt = datetime.fromisoformat(pa.replace("Z", "+00:00"))
+            # naive -> treat as UTC
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            if (now - dt).total_seconds() <= hours * 3600:
+                out.append(it)
+        except Exception:
+            out.append(it)
+    return out
+
 
 async def run_search_collect_buffer(app, chat_id: int, user_id: int, one_off: bool = False) -> None:
     s = get_user_settings(user_id)
@@ -262,14 +302,16 @@ async def run_search_collect_buffer(app, chat_id: int, user_id: int, one_off: bo
     # scrape up to max_items each run (cheap)
     items = await ricardo_collect_items(urls=urls, max_items=max_items, fetch_sellers=True)
     items = filter_by_blacklists(user_id, items)
+    items = filter_last_hours(items, hours=12)
     items = filter_new_only(user_id, items)
+    items = filter_unique_sellers(items)
 
     st = get_user_state(user_id)
     sent_links = st.get("sent_links", [])
     buf = st.get("buffer", [])
 
     for it in items:
-        lk = it.get("item_link")
+        lk = it.get("url") or it.get("item_link")
         if lk:
             sent_links.append(lk)
         buf.append(it)
@@ -614,6 +656,9 @@ def main():
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_START)}$"), text_start),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_STOP)}$"), text_stop),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_SETTINGS)}$"), text_settings),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_COUNT)}$"), text_count),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_CATS)}$"), text_cats),
+                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BLACKLIST)}$"), text_blacklist),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_ADMIN)}$"), admin_panel),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
@@ -638,10 +683,6 @@ def main():
     )
     application.add_handler(conv)
 
-    # Settings handlers in MAIN state (keep menu structure like old)
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_COUNT)}$"), text_count))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_CATS)}$"), text_cats))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BLACKLIST)}$"), text_blacklist))
 
     if webhook_base:
         webhook_url = _ensure_webhook_url(webhook_base, webhook_path)
