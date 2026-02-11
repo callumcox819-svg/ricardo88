@@ -24,9 +24,14 @@ def normalize_proxy(line: str) -> Optional[str]:
     line = (line or "").strip()
     if not line:
         return None
+    # remove accidental spaces
+    line = "".join(line.split())
     if "://" not in line:
-        # default to socks5 for your case
+        # default to socks5
         return "socks5://" + line
+    # normalize scheme case + socks5h
+    line = line.replace("Sock5://", "socks5://").replace("SOCKS5://", "socks5://")
+    line = line.replace("socks5h://", "socks5://")
     return line
 
 def set_proxies(lines: List[str]) -> int:

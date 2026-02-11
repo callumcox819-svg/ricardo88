@@ -3,6 +3,7 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
@@ -31,6 +32,58 @@ POPULAR_CATEGORIES: Dict[str, str] = {
     "Часы": "https://www.ricardo.ch/de/c/o/uhren-schmuck-42272/",
     "Все подряд": "__ALL__",
 }
+
+
+def _normalize_ricardo_url(url: str) -> str:
+    """Best-effort URL normalization.
+
+    We repeatedly saw accidental '/de/de/' in generated URLs.
+    Also accept relative URLs and ensure a trailing slash for category pages.
+    """
+    u = (url or "").strip()
+    if not u:
+        return u
+    if u.startswith("/"):
+        u = "https://www.ricardo.ch" + u
+    # Fix duplicate locale in path
+    u = u.replace("https://www.ricardo.ch/de/de/", "https://www.ricardo.ch/de/")
+    u = u.replace("http://www.ricardo.ch/de/de/", "https://www.ricardo.ch/de/")
+    # Ensure trailing slash for category/search pages (Ricardo uses both, but it's safer)
+    if re.match(r"^https://www\.ricardo\.ch/de/(c|s)/.+[^/]$", u):
+        u += "/"
+    return u
+
+
+def _playwright_proxy(proxy_url: Optional[str]) -> Optional[Dict[str, str]]:
+    """Convert a proxy string into Playwright's proxy dict.
+
+    Playwright expects credentials separately (username/password), not inside server.
+    If we pass creds in the URL as server, Chromium can fail with ERR_SOCKS_CONNECTION_FAILED.
+    """
+    if not proxy_url:
+        return None
+
+    p = normalize_proxy(proxy_url) or proxy_url
+    p = p.strip()
+    if not p:
+        return None
+
+    try:
+        pr = urlparse(p)
+        scheme = (pr.scheme or "socks5").lower()
+        host = pr.hostname
+        port = pr.port
+        if not host or not port:
+            # give it to Playwright as-is
+            return {"server": p}
+        out: Dict[str, str] = {"server": f"{scheme}://{host}:{port}"}
+        if pr.username:
+            out["username"] = pr.username
+        if pr.password:
+            out["password"] = pr.password
+        return out
+    except Exception:
+        return {"server": p}
 
 def _is_cf_page(html: str) -> bool:
     h = html.lower()
@@ -158,16 +211,19 @@ def _expand_overview_links(html: str) -> List[str]:
         # only category listing pages, not /c/o/
         if re.match(r"^/de/c/[^/]+-\d+/?$", href) and "/de/c/o/" not in href:
             full = "https://www.ricardo.ch" + (href if href.endswith("/") else href + "/")
+            full = _normalize_ricardo_url(full)
             if full not in seen:
                 seen.add(full)
                 out.append(full)
     return out
 
 async def _fetch_html(url: str, proxy_url: Optional[str]) -> str:
+    url = _normalize_ricardo_url(url)
     async with async_playwright() as p:
         launch_kwargs = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
-        if proxy_url:
-            launch_kwargs["proxy"] = {"server": proxy_url}
+        pw_proxy = _playwright_proxy(proxy_url)
+        if pw_proxy:
+            launch_kwargs["proxy"] = pw_proxy
         browser = await p.chromium.launch(**launch_kwargs)
         page = await browser.new_page()
         await page.goto(url, wait_until="domcontentloaded", timeout=90000)
@@ -251,6 +307,9 @@ async def ricardo_collect_items(urls: List[str], max_items: int, fetch_sellers: 
     - Accepts listing pages (/de/c/...) and overview pages (/de/c/o/...) and expands overviews.
     - No extra filters (auction + buy-now are both allowed).
     """
+    # normalize URLs early (fix accidental /de/de/ etc.)
+    urls = [_normalize_ricardo_url(u) if u and u != "__ALL__" else u for u in (urls or [])]
+
     if "__ALL__" in urls:
         urls = [u for k, u in POPULAR_CATEGORIES.items() if k != "Все подряд"]
 
