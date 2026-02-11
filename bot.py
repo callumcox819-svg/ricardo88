@@ -2,11 +2,11 @@
 import os
 import re
 import json
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
-import asyncio
 
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -15,7 +15,7 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-from ricardo_api import ricardo_collect_items, POPULAR_CATEGORIES
+from ricardo_playwright import POPULAR_CATEGORIES, ricardo_collect_items, proxy_smoke_test
 import proxy_manager
 import admin_store
 
@@ -233,15 +233,18 @@ def save_json_result(items: List[Dict[str, Any]], user_id: int) -> Path:
 
 def filter_by_blacklists(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     blocked = set(get_blacklist_general()) | set(get_blacklist_personal(user_id))
-    out: List[Dict[str, Any]] = []
+    out = []
     for it in items:
-        seller = (it.get('seller') or '').strip()
+        seller = (it.get("item_person_name") or "").strip()
         if seller and seller in blocked:
             continue
         out.append(it)
     return out
 
-
+def filter_new_only(user_id: int, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    st = get_user_state(user_id)
+    sent = set(st.get("sent_links", []))
+    return [it for it in items if it.get("item_link") and it["item_link"] not in sent]
 
 async def run_search_collect_buffer(app, chat_id: int, user_id: int, one_off: bool = False) -> None:
     s = get_user_settings(user_id)
@@ -250,40 +253,28 @@ async def run_search_collect_buffer(app, chat_id: int, user_id: int, one_off: bo
     selected = s.get("cats_selected", [])
 
     if mode == "all":
-        urls = [POPULAR_CATEGORIES["Все подряд"]]
+        urls = ["__ALL__"]
     else:
         urls = [POPULAR_CATEGORIES[n] for n in selected if n in POPULAR_CATEGORIES]
         if not urls:
-            urls = [POPULAR_CATEGORIES["Все подряд"]]
+            urls = ["__ALL__"]
+
+    # scrape up to max_items each run (cheap)
+    items = await ricardo_collect_items(urls=urls, max_items=max_items, fetch_sellers=True)
+    items = filter_by_blacklists(user_id, items)
+    items = filter_new_only(user_id, items)
 
     st = get_user_state(user_id)
-    sent_links = list(st.get("sent_links", []))
-    sent_sellers = set(st.get("sent_sellers", []))
-    buf = list(st.get("buffer", []))
-
-    # collect fresh items (best-effort: within last 12h) and avoid repeating sellers for this user
-    items = await asyncio.to_thread(
-        ricardo_collect_items,
-        list_page_urls=urls,
-        max_items=max_items,
-        hours_back=12,
-        seen_sellers=sent_sellers,
-        seen_urls=set(sent_links),
-    )
-
-    items = filter_by_blacklists(user_id, items)
+    sent_links = st.get("sent_links", [])
+    buf = st.get("buffer", [])
 
     for it in items:
-        lk = it.get("url")
-        seller = (it.get("seller") or "").strip()
+        lk = it.get("item_link")
         if lk:
             sent_links.append(lk)
-        if seller:
-            sent_sellers.add(seller)
         buf.append(it)
 
     st["sent_links"] = sent_links[-5000:]
-    st["sent_sellers"] = list(sent_sellers)[:5000]
     st["buffer"] = buf
     set_user_state(user_id, st)
 
@@ -291,16 +282,15 @@ async def run_search_collect_buffer(app, chat_id: int, user_id: int, one_off: bo
     if len(buf) >= max_items:
         to_send = buf[:max_items]
         rest = buf[max_items:]
+        st = get_user_state(user_id)
         st["buffer"] = rest
         set_user_state(user_id, st)
 
-        path = save_json_result(user_id, to_send)
-        await app.bot.send_message(chat_id, f"Готово ✅ Нашёл {len(to_send)} объявлений. Отправляю JSON…")
+        path = save_json_result(to_send, user_id)
         await app.bot.send_document(chat_id, document=open(path, "rb"))
     else:
         if one_off and not items:
             await app.bot.send_message(chat_id, "Новых объявлений нет ✅ (коплю до лимита)")
-
 
 def _remove_job(context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
     for j in context.job_queue.get_jobs_by_name(name):
@@ -624,9 +614,6 @@ def main():
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_START)}$"), text_start),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_STOP)}$"), text_stop),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_SETTINGS)}$"), text_settings),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_COUNT)}$"), text_count),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_CATS)}$"), text_cats),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BLACKLIST)}$"), text_blacklist),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_ADMIN)}$"), admin_panel),
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BACK)}$"), go_back),
             ],
@@ -650,6 +637,12 @@ def main():
         fallbacks=[CommandHandler("start", cmd_start)],
     )
     application.add_handler(conv)
+
+    # Settings handlers in MAIN state (keep menu structure like old)
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_COUNT)}$"), text_count))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_CATS)}$"), text_cats))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(BTN_BLACKLIST)}$"), text_blacklist))
+
     if webhook_base:
         webhook_url = _ensure_webhook_url(webhook_base, webhook_path)
         logger.info("Starting webhook on 0.0.0.0:%s url=%s", port, webhook_url)
